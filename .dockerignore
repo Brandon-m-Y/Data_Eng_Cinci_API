@@ -1,0 +1,21 @@
+# Secrets: never bake these into the image
+.env
+*.json
+
+# Git, Python, editor
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.vscode/
+
+# Notebooks, docs, local data
+*.ipynb
+.ipynb_checkpoints/
+*.md
+data/
+*.csv
+*.parquet
+requirements-dev.txt

@@ -1,0 +1,6 @@
+# Local development: runtime deps plus notebooks
+-r requirements.txt
+
+seaborn==0.13.2
+matplotlib==3.10.7
+ipykernel==6.30.0

@@ -1,0 +1,9 @@
+# Pipeline runtime (what the Docker image installs).
+# Pinned to the versions this project was built and tested with (Python 3.13)
+requests==2.34.2
+pandas==2.3.1
+python-dotenv==1.2.2
+google-cloud-bigquery==3.42.2
+google-auth==2.56.0
+pyarrow==24.0.0
+db-dtypes==1.7.1

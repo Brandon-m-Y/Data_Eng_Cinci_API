@@ -1,0 +1,17 @@
+# Secrets
+.env
+cincinnati-open-crash-data-*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local data extracts
+data/
+*.csv
+*.parquet
