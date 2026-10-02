@@ -92,8 +92,25 @@ def main():
     client = bigquery_datatransfer.DataTransferServiceClient()
     parent = f'projects/{project}/locations/{location}'
 
-    existing = next((t for t in client.list_transfer_configs(parent=parent)
-                     if t.display_name == DISPLAY_NAME), None)
+    # Match loosely on the name: the BigQuery console stores "crash-etl
+    # watchdog" as "crash-etl_watchdog", and an exact comparison would miss a
+    # config created there and quietly create a second one beside it.
+    def _norm(name):
+        return ''.join(ch for ch in name.lower() if ch.isalnum())
+
+    matches = [t for t in client.list_transfer_configs(parent=parent)
+               if _norm(t.display_name) == _norm(DISPLAY_NAME)]
+    if len(matches) > 1:
+        print(f'WARNING: {len(matches)} configs match "{DISPLAY_NAME}". '
+              'Delete the extras; acting on the first:')
+        for t in matches:
+            print(f'    {t.name.split("/")[-1]}  {t.display_name}')
+
+    # list_transfer_configs leaves owner_info empty; only get_transfer_config
+    # fills it in. Reading it from the list response reports every config as
+    # having no owner, which is how this script spent an afternoon claiming a
+    # perfectly good user-owned watchdog could not send mail.
+    existing = client.get_transfer_config(name=matches[0].name) if matches else None
 
     # Refuse before deleting anything. Creating a config owned by a person
     # requires an OAuth authorization code, which the API calls version_info
@@ -131,11 +148,12 @@ def main():
               f'  failure email : {existing.email_preferences.enable_failure_email}\n'
               f'  mail goes to  : {owner or "NOBODY - owned by a service account"}\n'
               f'  query         : {"matches watchdog.sql" if matches else "DIFFERS from watchdog.sql"}')
-        if not owner and existing.email_preferences.enable_failure_email:
-            print('  WARNING: failure email is on but there is no owner address, so no\n'
-                  '  mail can be sent. The checks run; nobody hears about a failure.\n'
-                  '  Fixing this means recreating it owned by a person, which only the\n'
-                  '  BigQuery console can do -- see DEPLOY.md step 8.')
+        owned_by_robot = not owner or owner.endswith('.iam.gserviceaccount.com')
+        if owned_by_robot and existing.email_preferences.enable_failure_email:
+            print('  WARNING: failure email is on, but the owner is a service account,\n'
+                  '  which has no mailbox. The checks run; nobody hears about a\n'
+                  '  failure. Recreate it owned by a person -- only the BigQuery\n'
+                  '  console can do that; see DEPLOY.md step 8.')
         if not matches:
             print('  WARNING: the deployed query is not the one in this repo.\n'
                   '    python deploy/create_watchdog.py --update --service-account <SA>')
