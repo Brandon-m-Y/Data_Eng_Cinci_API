@@ -451,8 +451,11 @@ by fixing the code and reloading, not by restoring a backup.
 ## Appendix A — GitHub Actions (phase 2)
 
 Not required to run on a schedule; this only removes the manual build in step
-5. [.github/workflows/deploy.yml](.github/workflows/deploy.yml) is written but
-has not been exercised yet.
+5. [.github/workflows/deploy.yml](.github/workflows/deploy.yml) already runs
+the offline suite on every push — confirmed green on Ubuntu with Python 3.13.
+Its **deploy** job is skipped until `GCP_WIF_PROVIDER` is set, so the
+workflow stays green instead of failing at auth and mailing you about it.
+Setting the three variables below is what switches deploying on.
 
 **This repository is public, so a JSON key must never be used here.** Workload
 Identity Federation lets GitHub mint short-lived tokens instead, with no

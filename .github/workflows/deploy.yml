@@ -3,8 +3,8 @@
 # This only replaces the manual build in DEPLOY.md step 5. It does not create
 # any infrastructure, and it never runs the pipeline -- Cloud Scheduler does
 # that. Setup for the Workload Identity Federation this depends on is in
-# DEPLOY.md Appendix A. Until that exists, this workflow fails at the auth
-# step and nothing else is affected.
+# DEPLOY.md Appendix A. Until the GCP_WIF_PROVIDER variable is set, the
+# deploy job is skipped and only the test job runs.
 #
 # The offline suite gates the deploy. The integration suite does not run here:
 # it needs credentials, clones the dataset and takes ~30 minutes. Run it
@@ -47,8 +47,12 @@ jobs:
       - name: Offline suite
         run: python -m unittest discover -s tests
 
+  # Skipped, not failed, until Workload Identity Federation exists. Setting
+  # GCP_WIF_PROVIDER (DEPLOY.md Appendix A) is what switches deploying on;
+  # without it this job would fail at auth on every push and mail about it.
   deploy:
     needs: test
+    if: ${{ vars.GCP_WIF_PROVIDER != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
