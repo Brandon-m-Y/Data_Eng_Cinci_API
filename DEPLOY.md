@@ -20,10 +20,45 @@ costs almost nothing and bounds how far a missed delta can drift.
 
 ## Before you start
 
-- `gcloud` and `docker` installed, Docker Desktop running.
+Checked on this machine 2026-10-02: the Google Cloud SDK was **not
+installed**, and Docker Desktop was installed but **not running**. That is not
+an oversight — the pipeline has only ever reached BigQuery through the Python
+client and a service-account key, so `gcloud` and `bq` were never needed until
+this runbook. Both are needed now.
+
+**1. Install the Cloud SDK** (this is what provides `gcloud` and `bq`), then
+open a *new* terminal so the PATH refreshes:
+
+```powershell
+winget install --id Google.CloudSDK --exact
+```
+
+**2. Sign in as yourself** — not with the pipeline's service-account key.
+Steps 1–4 enable APIs and create service accounts, which that key has no
+permission to do:
+
+```powershell
+gcloud auth login
+gcloud config set project cincinnati-open-crash-data
+```
+
+Verify with `gcloud auth list` and `bq query --use_legacy_sql=false "SELECT 1"`.
+
+**3. Start Docker Desktop** and let it finish starting. Only step 5 needs it,
+so you can leave this until then:
+
+```powershell
+Start-Process "$env:LOCALAPPDATA\Programs\DockerDesktop\Docker Desktop.exe"
+```
+
+Verify with `docker version` — the **Server** line must be present, not just
+the client. WSL 2 is already configured on this machine.
+
+Also true before you begin:
+
 - You are Owner on `cincinnati-open-crash-data`.
-- The offline and integration suites pass locally. Deploying a red build just
-  moves the failure somewhere harder to see.
+- The offline suite passes: `python -m unittest discover -s tests` (51 tests).
+  Deploying a red build just moves the failure somewhere harder to see.
 - Nothing else is mid-load. Step 7 takes the writer lock; a local run holding
   it will make the cloud run fail fast on a held lock, which is correct
   behaviour but a confusing first result.
