@@ -2,7 +2,7 @@
 
 ## Project summary
 
-Cincinnati publishes every police traffic-crash report as open data — in a
+Cincinnati publishes every police traffic-crash report as open data  in a
 shape that resists analysis. One row per person rather than per crash, every
 value a raw string, two incompatible coding eras sitting side by side, and no
 reliable way to ask what changed since last time.
@@ -96,17 +96,17 @@ wrong. [OPERATIONS.md](OPERATIONS.md) is how it behaves;
 Everything in the warehouse derives from **one** public source. There is no
 private data, no scraped data and no manual entry anywhere in the pipeline.
 
-| | |
-|---|---|
-| Dataset | **Traffic Crash Reports (CPD)** |
-| Publisher | Cincinnati Police Department, via the City of Cincinnati open data portal |
-| Portal | [data.cincinnati-oh.gov](https://data.cincinnati-oh.gov/) |
-| Identifier | Socrata dataset `rvmt-pkmq` |
-| Access | Socrata **v3** API, `POST` query body, 50,000-row pages ordered by `:id` |
-| Credential | A free Socrata app token — rate limiting only. The data itself is public and needs no authentication |
-| Full extract | ~435 MB, 433,160 person-rows, 221,289 crashes |
-| Crash dates | 1900-02-06 to 2026-08-24. Only **2** rows predate 2010, and both are data-entry errors; the usable history starts in 2010 |
-| Columns | 31, all delivered as strings |
+|              |                                                                                                                                |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| Dataset      | **Traffic Crash Reports (CPD)**                                                                                          |
+| Publisher    | Cincinnati Police Department, via the City of Cincinnati open data portal                                                      |
+| Portal       | [data.cincinnati-oh.gov](https://data.cincinnati-oh.gov/)                                                                       |
+| Identifier   | Socrata dataset`rvmt-pkmq`                                                                                                   |
+| Access       | Socrata**v3** API, `POST` query body, 50,000-row pages ordered by `:id`                                              |
+| Credential   | A free Socrata app token — rate limiting only. The data itself is public and needs no authentication                          |
+| Full extract | ~435 MB, 433,160 person-rows, 221,289 crashes                                                                                  |
+| Crash dates  | 1900-02-06 to 2026-08-24. Only**2** rows predate 2010, and both are data-entry errors; the usable history starts in 2010 |
+| Columns      | 31, all delivered as strings                                                                                                   |
 
 The feed is a police **report** extract, not a sensor or telematics feed.
 Every row originates in an officer-completed crash report, which is why it
@@ -128,13 +128,13 @@ per crash throws away every passenger and pedestrian.
 
 The 31 columns fall into five groups:
 
-| Group | Columns |
-|---|---|
-| Identity and time | `instanceid`, `localreportno`, `crashdate`, `datecrashreported`, plus Socrata's own `:id`, `:version`, `:created_at`, `:updated_at` |
-| Location | `address`, `latitude`, `longitude`, `zip`, three competing neighborhood schemes, `roadclass`, `roadclassdesc`, `crashlocation` |
-| Conditions | `lightconditionsprimary`, `roadconditionsprimary`, `roadcontour`, `roadsurface`, `weather` |
-| Crash classification | `mannerofcrash`, `crashseverity`, `crashseverityid` |
-| Person | `typeofperson`, `unittype`, `gender`, `age`, `injuries` |
+| Group                | Columns                                                                                                                                             |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Identity and time    | `instanceid`, `localreportno`, `crashdate`, `datecrashreported`, plus Socrata's own `:id`, `:version`, `:created_at`, `:updated_at` |
+| Location             | `address`, `latitude`, `longitude`, `zip`, three competing neighborhood schemes, `roadclass`, `roadclassdesc`, `crashlocation`        |
+| Conditions           | `lightconditionsprimary`, `roadconditionsprimary`, `roadcontour`, `roadsurface`, `weather`                                                |
+| Crash classification | `mannerofcrash`, `crashseverity`, `crashseverityid`                                                                                           |
+| Person               | `typeofperson`, `unittype`, `gender`, `age`, `injuries`                                                                                   |
 
 **There are no direct identifiers.** No names, no license or VIN numbers, no
 report narrative, and no exact addresses — the publisher masks those before
@@ -187,9 +187,9 @@ quirks, including the two coding eras and the junk values.
 Two tables exist with schemas and no rows. They are the intended second and
 third sources, and nothing depends on them yet:
 
-| Table | Intended source |
-|---|---|
-| `ml_weather_daily` | NOAA, Cincinnati/Northern Kentucky airport (CVG) station |
+| Table                  | Intended source                                                                              |
+| ---------------------- | -------------------------------------------------------------------------------------------- |
+| `ml_weather_daily`   | NOAA, Cincinnati/Northern Kentucky airport (CVG) station                                     |
 | `ml_cell_attributes` | OpenStreetMap road miles and intersection counts, ODOT traffic volume (AADT), ACS population |
 
 Until they arrive, the panel's `exposure` denominator falls back to hours
@@ -209,22 +209,22 @@ the public endpoint and keeps a derived copy in a private BigQuery dataset.
 **The pipeline is deployed and running unattended.** As of 2026-10-02,
 BigQuery dataset `crashes` in `us-east1`:
 
-| Object | Type | Rows | Notes |
-|---|---|---:|---|
-| `stg_crash_person` | table | 6,790 | Raw feed, all STRING; replaced every load, so it holds whatever the **last** load fetched — currently a 90-day delta window, not the full history |
-| `vw_stg_crash_person_clean` | view | | The one place cleaning happens |
-| `fact_crash_person` | table | 433,160 | One row per person/unit per crash; 221,289 crashes, 1900-02-06 to 2026-08-24 |
-| `dim_date` | table | 9,497 | 2010-01-01 to 2035-12-31, plus the unknown member |
-| `dim_time` | table | 1,441 | Minute grain, plus the unknown member |
-| `dim_location` | table | 63,021 | Insert-only, so it grows as amended addresses arrive |
-| `dim_conditions` | table | 1,977 | Junk dimension |
-| `dim_crash_type` | table | 72 | |
-| `dim_person_profile` | table | 3,914 | Junk dimension |
-| `dim_crash_date`, `dim_reported_date` | views | | Role-playing views over `dim_date` |
-| `etl_load_log` | table | 10 | One row per load, with its status, counts and timings |
-| `etl_lease` | table | 1 | Which run may write; created by `--setup` |
-| `ml_crash_panel` | table | 205,746 | 53 neighborhoods × 3,882 days |
-| `ml_weather_daily`, `ml_cell_attributes` | tables | 0 | Schema ready; external data not loaded yet |
+| Object                                       | Type   |    Rows | Notes                                                                                                                                                   |
+| -------------------------------------------- | ------ | ------: | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stg_crash_person`                         | table  |   6,790 | Raw feed, all STRING; replaced every load, so it holds whatever the**last** load fetched — currently a 90-day delta window, not the full history |
+| `vw_stg_crash_person_clean`                | view   |         | The one place cleaning happens                                                                                                                          |
+| `fact_crash_person`                        | table  | 433,160 | One row per person/unit per crash; 221,289 crashes, 1900-02-06 to 2026-08-24                                                                            |
+| `dim_date`                                 | table  |   9,497 | 2010-01-01 to 2035-12-31, plus the unknown member                                                                                                       |
+| `dim_time`                                 | table  |   1,441 | Minute grain, plus the unknown member                                                                                                                   |
+| `dim_location`                             | table  |  63,021 | Insert-only, so it grows as amended addresses arrive                                                                                                    |
+| `dim_conditions`                           | table  |   1,977 | Junk dimension                                                                                                                                          |
+| `dim_crash_type`                           | table  |      72 |                                                                                                                                                         |
+| `dim_person_profile`                       | table  |   3,914 | Junk dimension                                                                                                                                          |
+| `dim_crash_date`, `dim_reported_date`    | views  |         | Role-playing views over`dim_date`                                                                                                                     |
+| `etl_load_log`                             | table  |      10 | One row per load, with its status, counts and timings                                                                                                   |
+| `etl_lease`                                | table  |       1 | Which run may write; created by`--setup`                                                                                                              |
+| `ml_crash_panel`                           | table  | 205,746 | 53 neighborhoods × 3,882 days                                                                                                                          |
+| `ml_weather_daily`, `ml_cell_attributes` | tables |       0 | Schema ready; external data not loaded yet                                                                                                              |
 
 **Where things stand:**
 
@@ -260,6 +260,7 @@ at all. The first Sunday full load is the real test.
 **Verified behavior.** The whole suite runs against a fresh clone of
 production (`tests/integration_bigquery.py`, 56 checks, last green
 2026-10-01), so these are observed, not intended:
+
 - **Rerun:** a second `--delta` or `--full` over unchanged data is a no-op --
   0 crashes new, changed or removed.
 - **Republish:** Socrata regenerates every `:id` on each publish, so the fact
@@ -278,6 +279,7 @@ production (`tests/integration_bigquery.py`, 56 checks, last green
   target-recomputation checks.
 
 Two episodes worth keeping, because both shaped the design:
+
 - **2026-09-19 — `:id` is not a stable key.** A Socrata republish regenerated
   every `:id`, and the `MERGE` keyed on it duplicated 6,791 rows. The fact
   moved to crash-level replacement on `instanceid` gated by a content hash.
@@ -347,16 +349,16 @@ constraints. `requirements-dev.txt` adds the notebook packages on top.
 
 `.env` settings (git-ignored):
 
-| Key | Value |
-|---|---|
-| `SOCRATA_APP_TOKEN` | Required. App token from the developer settings link below |
-| `GCP_PROJECT_ID` | Required. BigQuery project |
-| `GCP_DATASET` | Optional, default `crashes`. Moves every table the pipeline reads or writes: the SQL files say `crashes.` and the runner substitutes this name, so a scratch dataset is fully isolated. |
-| `GCP_LOCATION` | Optional, default `us-east1` |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Optional, and now normally unset. Path to a service-account key JSON. Unset, `get_client()` uses application-default credentials — yours locally, the job's attached service account on Cloud Run. It must point at a *service-account* key if set at all; an ADC user file is a different format and will not load. |
-| `SQL_FILE` | Optional, default `Star_Schema_ETL.sql` |
-| `PANEL_SQL_FILE` | Optional, default `ML_Crash_Panel.sql` |
-| `DELTA_LOOKBACK_DAYS` | Optional, default `90` |
+| Key                                | Value                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SOCRATA_APP_TOKEN`              | Required. App token from the developer settings link below                                                                                                                                                                                                                                                               |
+| `GCP_PROJECT_ID`                 | Required. BigQuery project                                                                                                                                                                                                                                                                                               |
+| `GCP_DATASET`                    | Optional, default`crashes`. Moves every table the pipeline reads or writes: the SQL files say `crashes.` and the runner substitutes this name, so a scratch dataset is fully isolated.                                                                                                                               |
+| `GCP_LOCATION`                   | Optional, default`us-east1`                                                                                                                                                                                                                                                                                            |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Optional, and now normally unset. Path to a service-account key JSON. Unset,`get_client()` uses application-default credentials — yours locally, the job's attached service account on Cloud Run. It must point at a *service-account* key if set at all; an ADC user file is a different format and will not load. |
+| `SQL_FILE`                       | Optional, default`Star_Schema_ETL.sql`                                                                                                                                                                                                                                                                                 |
+| `PANEL_SQL_FILE`                 | Optional, default`ML_Crash_Panel.sql`                                                                                                                                                                                                                                                                                  |
+| `DELTA_LOOKBACK_DAYS`            | Optional, default`90`                                                                                                                                                                                                                                                                                                  |
 
 `GCP_STAGING_TABLE` is no longer configurable (the SQL names the table), and
 the pipeline refuses to start if it's set to anything but `stg_crash_person`.
@@ -378,14 +380,14 @@ python Run_Pipeline.py --full --reprocess   # after changing cleaning logic
 python Run_Pipeline.py --panel              # rebuild only the ML panel
 ```
 
-| Flag | What runs |
-|---|---|
-| `--setup` | Creates the dataset and the lease table (Section 10), then star-schema Sections 1 (DDL, migrations, cleaning view), 2 (seed calendar, time and unknown members) and 7 (role-playing views). Safe to rerun; run it after pulling schema changes. |
-| `--delta` | Fetches only the watermark window, then runs the load sequence below. |
-| `--full` | Fetches the whole history (about 9 pages), then runs the load sequence below. |
-| `--reprocess` | With `--full` only. Runs `--setup` first (to install the changed view), updates the derived attributes of existing dimension members in place, and rewrites every crash. Use it after changing the cleaning view or a derived column in Section 4. |
-| `--allow-deletions` | Lets a load delete more crashes than the cap (100, or 1% of the crashes it could delete, whichever is larger). Use it only after confirming the feed really dropped them. |
-| `--panel` | Rebuilds `ml_crash_panel` without loading. |
+| Flag                  | What runs                                                                                                                                                                                                                                             |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--setup`           | Creates the dataset and the lease table (Section 10), then star-schema Sections 1 (DDL, migrations, cleaning view), 2 (seed calendar, time and unknown members) and 7 (role-playing views). Safe to rerun; run it after pulling schema changes.       |
+| `--delta`           | Fetches only the watermark window, then runs the load sequence below.                                                                                                                                                                                 |
+| `--full`            | Fetches the whole history (about 9 pages), then runs the load sequence below.                                                                                                                                                                         |
+| `--reprocess`       | With`--full` only. Runs `--setup` first (to install the changed view), updates the derived attributes of existing dimension members in place, and rewrites every crash. Use it after changing the cleaning view or a derived column in Section 4. |
+| `--allow-deletions` | Lets a load delete more crashes than the cap (100, or 1% of the crashes it could delete, whichever is larger). Use it only after confirming the feed really dropped them.                                                                             |
+| `--panel`           | Rebuilds`ml_crash_panel` without loading.                                                                                                                                                                                                           |
 
 `--delta` and `--full` can't be combined. `--setup` combines with either.
 
@@ -443,25 +445,26 @@ design behind it: what each piece is for and why it is shaped this way.
                   BigQuery dataset `crashes`
 ```
 
-| Decision | Why |
-|---|---|
-| Cloud Scheduler runs the job; GitHub Actions only builds and deploys | GitHub's `schedule:` cron is best effort. Runs are often 10–60+ minutes late, and it's disabled after 60 days without commits on a public repo. |
-| Cloud Run **Job**, not a service | The pipeline runs to completion and exits; it has no HTTP endpoint. |
-| Region `us-east1` | Same region as the dataset. |
-| No key file on Cloud Run | `Load_to_GBQ.get_client()` uses a key file only when `GOOGLE_APPLICATION_CREDENTIALS` is set. Otherwise it uses the job's attached service account. |
-| Workload Identity Federation for GitHub | No long-lived JSON key stored in GitHub secrets. |
-| Two service accounts | **Runtime:** BigQuery Data Editor, BigQuery Job User, Secret Manager Secret Accessor. **Deployer:** Artifact Registry Writer, Cloud Run Developer, and Service Account User on the runtime account. |
+| Decision                                                             | Why                                                                                                                                                                                                             |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cloud Scheduler runs the job; GitHub Actions only builds and deploys | GitHub's`schedule:` cron is best effort. Runs are often 10–60+ minutes late, and it's disabled after 60 days without commits on a public repo.                                                               |
+| Cloud Run**Job**, not a service                                | The pipeline runs to completion and exits; it has no HTTP endpoint.                                                                                                                                             |
+| Region`us-east1`                                                   | Same region as the dataset.                                                                                                                                                                                     |
+| No key file on Cloud Run                                             | `Load_to_GBQ.get_client()` uses a key file only when `GOOGLE_APPLICATION_CREDENTIALS` is set. Otherwise it uses the job's attached service account.                                                         |
+| Workload Identity Federation for GitHub                              | No long-lived JSON key stored in GitHub secrets.                                                                                                                                                                |
+| Two service accounts                                                 | **Runtime:** BigQuery Data Editor, BigQuery Job User, Secret Manager Secret Accessor. **Deployer:** Artifact Registry Writer, Cloud Run Developer, and Service Account User on the runtime account. |
 
 ### Job sizing
 
 Measured in the container on 2026-09-19:
 
-| Run | Rows fetched | Peak memory | Wall time |
-|---|---:|---:|---:|
-| `--delta` | 6,791 | 183 MB | ~90 s |
-| `--full` | 433,160 | 1.76 GB before the BigQuery upload | ~155 s |
+| Run         | Rows fetched |                        Peak memory | Wall time |
+| ----------- | -----------: | ---------------------------------: | --------: |
+| `--delta` |        6,791 |                             183 MB |     ~90 s |
+| `--full`  |      433,160 | 1.76 GB before the BigQuery upload |    ~155 s |
 
 Planned job settings:
+
 - **Memory:** 4 GiB, which leaves headroom over the 1.76 GB full-load peak.
 - **Task timeout:** 1 hour. The 10-minute default is too tight given the
   600-second page timeouts. BigQuery's 30-minute job timeout is best effort;
@@ -529,50 +532,50 @@ On Windows, Docker Desktop needs WSL 2. If its engine won't start, run
 
 ### Status
 
-- [x] `Dockerfile` and `.dockerignore`, with secrets kept out of the image
-- [x] Key-file-or-attached-account auth in `get_client()`
-- [x] Runtime and dev requirements split
-- [x] Container verified against production (`--setup`, `--full`, `--delta`)
-- [x] Fact load made safe for unattended runs (republish-proof, one
-      transaction, fails loudly)
-- [x] Audit hardening: verified extracts, staging validation, single-writer
-      lease, deletion cap, run status, `--reprocess`, configurable dataset,
-      locked dependencies and base image, BigQuery integration test
-- [x] Production migrated to the current schema (`--setup`, then
-      `--full --reprocess`, 2026-10-01): `distance_to_cbd_m` populated and
-      coordinates nulled in pairs
-- [x] Full-load cadence decided: weekly, Sunday 06:00 America/New_York
-- [x] Deployment runbook written and the supporting files with it:
-      [DEPLOY.md](DEPLOY.md), [deploy/watchdog.sql](deploy/watchdog.sql),
-      `deploy/create_watchdog.py`, `.github/workflows/deploy.yml`
-- [x] Watchdog SQL validated against production: the healthy path returns
-      `ok`, and all four guards were made to fire against simulated data
-- [x] Enabled APIs, Artifact Registry repo, both service accounts, Secret
-      Manager secret ([DEPLOY.md](DEPLOY.md) steps 1–4)
-- [x] Built, pushed and created both Cloud Run Jobs, pinned by image digest
-      (steps 5–6). The `--delta` smoke test ran against production and
-      released its lease (step 7)
-- [x] Watchdog scheduled query installed and its email proven: created in
-      the BigQuery console so a person owns it, daily at 14:00 UTC, and a
-      forced failure delivered mail (2026-10-02)
-- [x] Cloud Scheduler triggers live: `--delta` Mon–Sat, `--full` Sun, 06:00
-      America/New_York. End-to-end verified 2026-10-02 by firing one by hand
-      — trigger to execution in one second, finishing `succeeded` with the
-      lease released.
-- [x] Cloud Monitoring policy for failed executions (step 10), installed
-      from [deploy/alert_job_failed.json](deploy/alert_job_failed.json) so
-      the filter and aggregation live in the repo rather than in a console
-      form. **Proven**: a forced failure on 2026-10-02 exited in `argparse`
-      without touching the lease or the audit log, and the mail arrived
-- [x] Local service-account key retired (step 11). The only user-managed key
-      in the project is deleted and the JSON is off the disk; local runs use
-      your application-default credentials, the same `get_client()` branch
-      Cloud Run takes
-- [x] Workload Identity Federation (Appendix A): pool, provider restricted
-      to `Brandon-m-Y/Data_Eng_Cinci_API` by attribute condition, deployer
-      account, and the three repository variables. The deploy job has run
-      end to end — built, pushed, and repointed both jobs at
-      `sha256:fb7fbf44…` with no stored credential anywhere
+- [X] `Dockerfile` and `.dockerignore`, with secrets kept out of the image
+- [X] Key-file-or-attached-account auth in `get_client()`
+- [X] Runtime and dev requirements split
+- [X] Container verified against production (`--setup`, `--full`, `--delta`)
+- [X] Fact load made safe for unattended runs (republish-proof, one
+  transaction, fails loudly)
+- [X] Audit hardening: verified extracts, staging validation, single-writer
+  lease, deletion cap, run status, `--reprocess`, configurable dataset,
+  locked dependencies and base image, BigQuery integration test
+- [X] Production migrated to the current schema (`--setup`, then
+  `--full --reprocess`, 2026-10-01): `distance_to_cbd_m` populated and
+  coordinates nulled in pairs
+- [X] Full-load cadence decided: weekly, Sunday 06:00 America/New_York
+- [X] Deployment runbook written and the supporting files with it:
+  [DEPLOY.md](DEPLOY.md), [deploy/watchdog.sql](deploy/watchdog.sql),
+  `deploy/create_watchdog.py`, `.github/workflows/deploy.yml`
+- [X] Watchdog SQL validated against production: the healthy path returns
+  `ok`, and all four guards were made to fire against simulated data
+- [X] Enabled APIs, Artifact Registry repo, both service accounts, Secret
+  Manager secret ([DEPLOY.md](DEPLOY.md) steps 1–4)
+- [X] Built, pushed and created both Cloud Run Jobs, pinned by image digest
+  (steps 5–6). The `--delta` smoke test ran against production and
+  released its lease (step 7)
+- [X] Watchdog scheduled query installed and its email proven: created in
+  the BigQuery console so a person owns it, daily at 14:00 UTC, and a
+  forced failure delivered mail (2026-10-02)
+- [X] Cloud Scheduler triggers live: `--delta` Mon–Sat, `--full` Sun, 06:00
+  America/New_York. End-to-end verified 2026-10-02 by firing one by hand
+  — trigger to execution in one second, finishing `succeeded` with the
+  lease released.
+- [X] Cloud Monitoring policy for failed executions (step 10), installed
+  from [deploy/alert_job_failed.json](deploy/alert_job_failed.json) so
+  the filter and aggregation live in the repo rather than in a console
+  form. **Proven**: a forced failure on 2026-10-02 exited in `argparse`
+  without touching the lease or the audit log, and the mail arrived
+- [X] Local service-account key retired (step 11). The only user-managed key
+  in the project is deleted and the JSON is off the disk; local runs use
+  your application-default credentials, the same `get_client()` branch
+  Cloud Run takes
+- [X] Workload Identity Federation (Appendix A): pool, provider restricted
+  to `Brandon-m-Y/Data_Eng_Cinci_API` by attribute condition, deployer
+  account, and the three repository variables. The deploy job has run
+  end to end — built, pushed, and repointed both jobs at
+  `sha256:fb7fbf44…` with no stored credential anywhere
 
 ---
 
@@ -580,6 +583,7 @@ On Windows, Docker Desktop needs WSL 2. If its engine won't start, run
 
 **There is no usable change stamp in the feed.** Both were measured on the
 live API:
+
 - `:updated_at` and `:created_at` each have one distinct value across all
   433,160 rows, because Socrata restamps the dataset on every publish.
 - `:version` is unique per row but random (`rv-ei6x_bj7f_buq7`), so it
@@ -617,10 +621,12 @@ The delta therefore windows on **crash date**:
   judged from that, so the delta leaves it alone and counts it as
   `crashes_deferred`, and the next `--full` handles it. Two known gaps, both
   repaired by the next `--full`:
+
   - a crash whose date is amended to before the window looks deleted;
   - a crash whose upstream rows move partly before the window is rewritten
     without them.
 - **Checks, before anything commits:**
+
   - `fetch()`: exactly the source's row count, each `:id` once, one publish
     stamp, and unchanged metadata from start to finish. The expected columns
     must exist.
@@ -660,24 +666,24 @@ anything a delta deferred.
 `fact_crash_person` has **one row per person/unit involved in one crash**.
 The source is at that grain:
 
-| Column | Distinct values | Role |
-|---|---:|---|
-| `:id` | 433,160 | Unique per row, but regenerated on every republish |
-| `instanceid` | 221,289 | Crash level; degenerate dimension and the load's key |
-| `localreportno` | 221,289 | Crash level, 1:1 with `instanceid`; degenerate dimension |
+| Column            | Distinct values | Role                                                      |
+| ----------------- | --------------: | --------------------------------------------------------- |
+| `:id`           |         433,160 | Unique per row, but regenerated on every republish        |
+| `instanceid`    |         221,289 | Crash level; degenerate dimension and the load's key      |
+| `localreportno` |         221,289 | Crash level, 1:1 with`instanceid`; degenerate dimension |
 
 That works out to about 1.96 people per crash.
 
 ### Fact table: `fact_crash_person`
 
-| Group | Columns |
-|---|---|
-| Foreign keys | `crash_date_key`, `reported_date_key` (both role-play `dim_date`), `crash_time_key`, `location_key`, `conditions_key`, `crash_type_key`, `person_profile_key` |
-| Degenerate dimensions | `instanceid`, `localreportno` |
-| Source row id | `socrata_id` (`:id`); informational only, since it changes on every republish |
-| Measures | `person_count` (always 1), `is_injured`, `is_fatal` |
-| Other | `age`, `latitude`, `longitude`, `distance_to_cbd_m`, `crash_date`, `crash_datetime`, `reporting_lag_hours` |
-| Audit | `socrata_version`, `socrata_updated_at`, `loaded_at`, `crash_hash` (change detection) |
+| Group                 | Columns                                                                                                                                                                       |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Foreign keys          | `crash_date_key`, `reported_date_key` (both role-play `dim_date`), `crash_time_key`, `location_key`, `conditions_key`, `crash_type_key`, `person_profile_key` |
+| Degenerate dimensions | `instanceid`, `localreportno`                                                                                                                                             |
+| Source row id         | `socrata_id` (`:id`); informational only, since it changes on every republish                                                                                             |
+| Measures              | `person_count` (always 1), `is_injured`, `is_fatal`                                                                                                                     |
+| Other                 | `age`, `latitude`, `longitude`, `distance_to_cbd_m`, `crash_date`, `crash_datetime`, `reporting_lag_hours`                                                      |
+| Audit                 | `socrata_version`, `socrata_updated_at`, `loaded_at`, `crash_hash` (change detection)                                                                                 |
 
 - **Measures** are INT64 0/1 rather than BOOL, so they add up: `SUM(is_fatal)`
   counts fatalities and `AVG(is_injured)` gives an injury rate.
@@ -707,14 +713,14 @@ That works out to about 1.96 people per crash.
 
 ### Dimensions
 
-| Dimension | Type | Contents |
-|---|---|---|
-| `dim_date` | Generated calendar, role-playing | Smart key `YYYYMMDD`; day, week, month, quarter, year and weekend attributes. The source `dayofweek` column is dropped because this derives it. |
-| `dim_time` | Generated, minute grain | Key `HHMM`; 12- and 24-hour forms, time-of-day band, `is_rush_hour` (07–09, 15–18), `is_overnight` |
-| `dim_location` | Conformed | Block address, zip, three neighborhood schemes (community council, CPD, SNA), road class, crash location and `is_intersection`. Natural key is an MD5 of the 8 attributes. |
-| `dim_conditions` | Junk | Light, road condition, contour, surface and weather, raw and canonical. Flags `is_dark`, `is_slick`, `is_curve`, `is_grade`, `is_adverse_weather`. |
-| `dim_crash_type` | | Manner of crash and crash severity, raw and canonical, with severity rank, `is_injury_crash`, `is_fatal_crash`, `coding_era` |
-| `dim_person_profile` | Junk | Person type, unit type and category, gender, age band, injury severity (canonical, KABCO code, rank) |
+| Dimension              | Type                             | Contents                                                                                                                                                                    |
+| ---------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dim_date`           | Generated calendar, role-playing | Smart key`YYYYMMDD`; day, week, month, quarter, year and weekend attributes. The source `dayofweek` column is dropped because this derives it.                          |
+| `dim_time`           | Generated, minute grain          | Key`HHMM`; 12- and 24-hour forms, time-of-day band, `is_rush_hour` (07–09, 15–18), `is_overnight`                                                                   |
+| `dim_location`       | Conformed                        | Block address, zip, three neighborhood schemes (community council, CPD, SNA), road class, crash location and`is_intersection`. Natural key is an MD5 of the 8 attributes. |
+| `dim_conditions`     | Junk                             | Light, road condition, contour, surface and weather, raw and canonical. Flags`is_dark`, `is_slick`, `is_curve`, `is_grade`, `is_adverse_weather`.                 |
+| `dim_crash_type`     |                                  | Manner of crash and crash severity, raw and canonical, with severity rank,`is_injury_crash`, `is_fatal_crash`, `coding_era`                                           |
+| `dim_person_profile` | Junk                             | Person type, unit type and category, gender, age band, injury severity (canonical, KABCO code, rank)                                                                        |
 
 `dim_crash_date` and `dim_reported_date` are views over `dim_date` with
 prefixed column names, so a query joining both dates never has an ambiguous
@@ -758,33 +764,32 @@ cell × day rows adds the negatives: days with no crash appear as `crashes = 0`.
 
 ### Grain and coverage
 
-| Setting | Value | Reason |
-|---|---|---|
-| Cell | CPD neighborhood (53; `N/A` dropped) | Spec v1. SNA (51) and community council (71) can be switched in. |
-| Time | Day | Spec v1 |
-| Start | 2016-01-01 | The feed starts Nov 2012. Mid-2013 to mid-2014 runs about 800 crashes a month against 1,300+ either side, which is a reporting shift, and 2015 is still ramping up. From 2016 volume is stable. The Mar–May 2020 COVID dip is real and stays in. |
-| End | Newest crash date − 7 days | The newest day in the feed is partial (2026-08-24 had 1 crash against about 38 a day). |
-| Crash count | Distinct `instanceid` | Counting person rows would inflate multi-occupant crashes. Neighborhood and date never differ within a crash (0 of 221,289); the panel report prints the current count for each scheme, and a crash that disagrees is placed by its latest date and cell. |
+| Setting     | Value                                 | Reason                                                                                                                                                                                                                                                    |
+| ----------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cell        | CPD neighborhood (53;`N/A` dropped) | Spec v1. SNA (51) and community council (71) can be switched in.                                                                                                                                                                                          |
+| Time        | Day                                   | Spec v1                                                                                                                                                                                                                                                   |
+| Start       | 2016-01-01                            | The feed starts Nov 2012. Mid-2013 to mid-2014 runs about 800 crashes a month against 1,300+ either side, which is a reporting shift, and 2015 is still ramping up. From 2016 volume is stable. The Mar–May 2020 COVID dip is real and stays in.         |
+| End         | Newest crash date − 7 days           | The newest day in the feed is partial (2026-08-24 had 1 crash against about 38 a day).                                                                                                                                                                    |
+| Crash count | Distinct`instanceid`                | Counting person rows would inflate multi-occupant crashes. Neighborhood and date never differ within a crash (0 of 221,289); the panel report prints the current count for each scheme, and a crash that disagrees is placed by its latest date and cell. |
 
 Cell scheme, dates and split boundaries are `DECLARE` settings at the top of
 Section 2, so changing the grain doesn't mean rewriting the SQL.
 
 ### Columns
 
-| Group | Columns |
-|---|---|
-| Keys | `cell_scheme`, `cell_id`, `day` |
-| Target | `crashes_next_7`: crashes in this cell over days d+1…d+7. NULL for the last 7 days of the panel, where the window would run past the end and return a short sum — train on `WHERE crashes_next_7 IS NOT NULL`. |
-| Same-day count | `crashes`: how many happened on `day` itself. This is history, a feature, **not** the label. |
-| Lags | `lag_7`, `lag_364` (same weekday last year), `roll_28` (at least 14 days of history), `roll_91` (at least 30). All come from earlier days of the same cell. |
-| Calendar | `dow` (1 = Sunday), `month`, `is_weekend`, `is_holiday` (US federal, actual and observed dates), `doy_sin`, `doy_cos` |
-| Weather | `tmax_f`, `tmin_f`, `prcp_in`, `snow_in`, `snwd_in`, `awnd_mph`, joined on `day` from `ml_weather_daily` |
-| Cell attributes | `road_miles`, `intersection_count`, `aadt`, `population`, joined on cell from `ml_cell_attributes`; `distance_to_cbd_km`, derived in the build |
-| Exposure | `exposure`, `log_exposure` (pass as the model offset), `exposure_source` |
-| Split | `split`: train before 2024, valid 2024, test 2025 onward |
+| Group           | Columns                                                                                                                                                                                                              |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Keys            | `cell_scheme`, `cell_id`, `day`                                                                                                                                                                                |
+| Target          | `crashes_next_7`: crashes in this cell over days d+1…d+7. NULL for the last 7 days of the panel, where the window would run past the end and return a short sum — train on `WHERE crashes_next_7 IS NOT NULL`. |
+| Same-day count  | `crashes`: how many happened on `day` itself. This is history, a feature, **not** the label.                                                                                                               |
+| Lags            | `lag_7`, `lag_364` (same weekday last year), `roll_28` (at least 14 days of history), `roll_91` (at least 30). All come from earlier days of the same cell.                                                  |
+| Calendar        | `dow` (1 = Sunday), `month`, `is_weekend`, `is_holiday` (US federal, actual and observed dates), `doy_sin`, `doy_cos`                                                                                    |
+| Weather         | `tmax_f`, `tmin_f`, `prcp_in`, `snow_in`, `snwd_in`, `awnd_mph`, joined on `day` from `ml_weather_daily`                                                                                             |
+| Cell attributes | `road_miles`, `intersection_count`, `aadt`, `population`, joined on cell from `ml_cell_attributes`; `distance_to_cbd_km`, derived in the build                                                           |
+| Exposure        | `exposure`, `log_exposure` (pass as the model offset), `exposure_source`                                                                                                                                       |
+| Split           | `split`: train before 2024, valid 2024, test 2025 onward                                                                                                                                                           |
 
-The rolling windows end at the previous day (`ROWS BETWEEN n PRECEDING AND
-1 PRECEDING`), which is the SQL version of the spec's `shift(1)` before
+The rolling windows end at the previous day (`ROWS BETWEEN n PRECEDING AND 1 PRECEDING`), which is the SQL version of the spec's `shift(1)` before
 `rolling()`.
 
 ### Build checks
@@ -814,18 +819,18 @@ observed holidays match, plus the 14 actual dates that fell on weekends.
 
 ### Current results
 
-| Metric | Value | Spec expected |
-|---|---:|---|
-| Rows | 205,746 | ~180K |
-| Cells × days | 53 × 3,882 | |
-| Mean crashes per cell-day | 0.84 | ~0.8 |
-| Zero fraction | 53.8% | 50–70% |
-| Dispersion (variance ÷ mean) | 1.81 | Overdispersed, so Poisson is the floor |
-| Rows by split (train / valid / test) | 154,866 / 19,398 / 31,482 | |
-| Labelled rows (`crashes_next_7` not NULL) | 205,375 | 371 unlabelled = 53 cells × 7 days |
-| Mean `crashes_next_7` | 5.88 | ~6, the reason for the weekly horizon |
-| Zero fraction of `crashes_next_7` | 11.6% | Far below the 53.8% of the daily count |
-| Distance to downtown, nearest → farthest cell | 0.14 → 15.43 km | C.B.D./Riverfront → Sayler Park |
+| Metric                                         |                     Value | Spec expected                          |
+| ---------------------------------------------- | ------------------------: | -------------------------------------- |
+| Rows                                           |                   205,746 | ~180K                                  |
+| Cells × days                                  |               53 × 3,882 |                                        |
+| Mean crashes per cell-day                      |                      0.84 | ~0.8                                   |
+| Zero fraction                                  |                     53.8% | 50–70%                                |
+| Dispersion (variance ÷ mean)                  |                      1.81 | Overdispersed, so Poisson is the floor |
+| Rows by split (train / valid / test)           | 154,866 / 19,398 / 31,482 |                                        |
+| Labelled rows (`crashes_next_7` not NULL)    |                   205,375 | 371 unlabelled = 53 cells × 7 days    |
+| Mean`crashes_next_7`                         |                      5.88 | ~6, the reason for the weekly horizon  |
+| Zero fraction of`crashes_next_7`             |                     11.6% | Far below the 53.8% of the daily count |
+| Distance to downtown, nearest → farthest cell |          0.14 → 15.43 km | C.B.D./Riverfront → Sayler Park       |
 
 ### Not loaded yet
 
@@ -847,13 +852,13 @@ commits (see [Load strategy](#load-strategy-delta-vs-full)). Section 6 of
 `Star_Schema_ETL.sql` then prints these after every load, for watching the
 feed:
 
-| Check | Expected |
-|---|---|
-| Rows routed to unknown members | Crash dates 7 (5 NULL `crashdate` + 2 dated 1900), reported dates 7, times 5. **Location, conditions, crash type and person profile must be 0**; Section 5 fails a load that would add one. |
-| Grain | `persons_per_crash` about 1.96 (near 1.0 means staging was deduped on `instanceid`). `multi_date_crashes` 0: crashes whose person rows carry different dates, which deltas defer. `repeated_socrata_ids` 0. |
-| Source quality | NULL or invalid ages (about 55K), reported-before-crash (16), reported more than 30 days later (796). These measure the feed, not a bug; watch for jumps. |
-| Canonicalization coverage | Values falling into `Unknown` / `Other` while the raw value is present. A growing count means the feed introduced a new label. |
-| Coding-era split | Both eras present, with comparable injury rates. |
+| Check                          | Expected                                                                                                                                                                                                            |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rows routed to unknown members | Crash dates 7 (5 NULL`crashdate` + 2 dated 1900), reported dates 7, times 5. **Location, conditions, crash type and person profile must be 0**; Section 5 fails a load that would add one.                  |
+| Grain                          | `persons_per_crash` about 1.96 (near 1.0 means staging was deduped on `instanceid`). `multi_date_crashes` 0: crashes whose person rows carry different dates, which deltas defer. `repeated_socrata_ids` 0. |
+| Source quality                 | NULL or invalid ages (about 55K), reported-before-crash (16), reported more than 30 days later (796). These measure the feed, not a bug; watch for jumps.                                                           |
+| Canonicalization coverage      | Values falling into`Unknown` / `Other` while the raw value is present. A growing count means the feed introduced a new label.                                                                                   |
+| Coding-era split               | Both eras present, with comparable injury rates.                                                                                                                                                                    |
 
 ---
 
@@ -876,6 +881,7 @@ feed:
   (`2XX W MITCHELL AV`) and each row's lat/long is independently randomized
   around its true location — the rows of a single crash sit a median 113 m
   apart, and the same row moves between publishes. Measured 2026-10-01:
+
   - typical offset from the row's own address-block centre: **106 m** (p50),
     396 m (p90)
   - but **3.7% of rows sit over 2 km** from it, and the worst is 36 km, so
@@ -897,6 +903,7 @@ feed:
   illegal in BigQuery and are renamed to `socrata_*`. The `address_x` /
   `latitude_x` / `longitude_x` suffixes are merge leftovers and are dropped.
 - **Junk values:**
+
   - ages like `BB`, `NN` and `913`
   - zips like `454229`
   - a mis-encoded dash and the misspelling `LIGHTIED` in light conditions
@@ -915,80 +922,80 @@ feed:
 
 ## Design decisions
 
-| Decision | Why |
-|---|---|
-| All-STRING staging | A malformed value lands in staging instead of failing the load. `SAFE_CAST` in the view quarantines it where Section 6 can count it. |
-| Fact replaced one crash at a time on `instanceid`, gated by a content hash | `:id` is regenerated on every republish, and a `MERGE` on it duplicated every row in the window. The hash keeps reruns and no-change republishes as no-ops, and amendments land wherever they are. |
-| Watermark read from the fact, not a state table | Self-healing: no stored state can drift out of sync with the fact after a failed run. |
-| Delete reconciliation limited to the load window | Deltas can remove upstream deletions without treating every row outside the window as deleted. |
-| One writer at a time through a non-expiring owner lock | Every writer (staging load, merges, fact, panel) is serialized by one row in `etl_lease`. A timestamp never permits takeover: an old process could be paused before submitting its recorded job. Unknown submissions and interrupted jobs retain ownership. Recovery requires stopping the process, confirming its jobs are terminal, then clearing only that owner. The fact transaction also checks ownership before committing. |
-| `--reprocess` for logic changes, not a transformation version | The hash covers raw source values, so logic changes don't trigger rewrites by themselves. An explicit, supervised full reprocess keeps the load simple; a version column would add state for an event that happens rarely and by hand. |
-| `\|` / `~` in natural keys rejected, not migrated | The readable natural keys join values with `\|` and write NULL as `~`, so a value containing either could merge two members. None does in the whole history, so Section 3 fails a load that would introduce one rather than migrating every dimension key now. |
-| Extract verified against the source, not only against the fact | The fact-window guards can't tell a partial extract from real deletions. Matching the source's own row count and publish stamp before and after paging can. |
-| Lat/long on the fact | Exact coordinates are almost unique per row. In the dimension they would make it as big as the fact. |
-| Downtown anchored at Fountain Square, verified against the data | Fountain Square (39.1011, −84.5125) is Cincinnati's central public square and the conventional centre of the CBD, so it needs no arbitrary choice to defend. It was checked against this dataset rather than taken on trust: the median coordinate of the 5XX VINE ST block (Fountain Square's own block, n=256) is 70 m away, and the median of the whole `C. B. D. / RIVERFRONT` neighborhood (n=30,766) is 120 m away. Both independent estimates land inside the published coordinate fuzz, which is as close as this data can resolve. |
-| Distance kept raw per row, aggregated to a median per cell | The two uses need different treatment. On the fact the honest thing is the row's own distance, left noisy and documented as such. In the panel a feature has to be stable, so the cell's centre is the marginal median of its crash coordinates — the fuzz (~106 m) and the ~3.7% of rows that sit over 2 km from their own address block both wash out of a median over hundreds of crashes, where a mean would chase them. |
-| Panel is a table, not a view | Training reads a stable snapshot, reads are cheap, and publishing waits for the assertions to pass. |
-| Forecast target is the next 7 days per `cpd_neighborhood` | Daily counts at neighborhood grain are too sparse to model: 0.84 per cell-day with 54% zeros, so a next-day model predicts 0 or 1 and shows no skill over a seasonal baseline. Weekly totals average ~6 per cell. `cpd_neighborhood` is the reporting agency's own geography and the least sparse of the three schemes. The panel carries the label as `crashes_next_7` (NULL for the last 7 days, where the window would return a short sum), checked on every build against a recomputation from the following seven days. The panel stays event-time, so lagging the features to the forecast issue time and swapping observed weather for a forecast belong in the training code, where the issue time is known. See `crash-panel-spec.md`. |
-| A neighborhood joins the panel after 100 crashes, not on first sight | One misspelling, or one crash geocoded into a place the city doesn't use, would otherwise add a cell that is almost entirely zeros and drag down every pooled model. The threshold is self-maintaining, where a fixed list would need editing whenever the city changes its geography, and the panel report prints every held-out neighborhood with its count so a real one sitting just under the line stays visible. |
-| Panel is fully rebuilt each load, not incrementally | Rolling features and zero-filled cells depend on neighboring days. A late or amended crash changes `lag_7`, `roll_28`, `roll_91` and `lag_364` for up to a year of later rows in its cell. At about 200K rows a rebuild takes seconds, while an incremental version would need to recompute a trailing window anyway. |
-| Holidays flag both actual and observed dates | July 4 traffic happens on the 4th even when the day off is the 3rd. |
+| Decision                                                                    | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| All-STRING staging                                                          | A malformed value lands in staging instead of failing the load.`SAFE_CAST` in the view quarantines it where Section 6 can count it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Fact replaced one crash at a time on`instanceid`, gated by a content hash | `:id` is regenerated on every republish, and a `MERGE` on it duplicated every row in the window. The hash keeps reruns and no-change republishes as no-ops, and amendments land wherever they are.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Watermark read from the fact, not a state table                             | Self-healing: no stored state can drift out of sync with the fact after a failed run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Delete reconciliation limited to the load window                            | Deltas can remove upstream deletions without treating every row outside the window as deleted.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| One writer at a time through a non-expiring owner lock                      | Every writer (staging load, merges, fact, panel) is serialized by one row in`etl_lease`. A timestamp never permits takeover: an old process could be paused before submitting its recorded job. Unknown submissions and interrupted jobs retain ownership. Recovery requires stopping the process, confirming its jobs are terminal, then clearing only that owner. The fact transaction also checks ownership before committing.                                                                                                                                                                                                                                                                                                                  |
+| `--reprocess` for logic changes, not a transformation version             | The hash covers raw source values, so logic changes don't trigger rewrites by themselves. An explicit, supervised full reprocess keeps the load simple; a version column would add state for an event that happens rarely and by hand.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `\|` / `~` in natural keys rejected, not migrated                        | The readable natural keys join values with`\|` and write NULL as `~`, so a value containing either could merge two members. None does in the whole history, so Section 3 fails a load that would introduce one rather than migrating every dimension key now.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Extract verified against the source, not only against the fact              | The fact-window guards can't tell a partial extract from real deletions. Matching the source's own row count and publish stamp before and after paging can.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Lat/long on the fact                                                        | Exact coordinates are almost unique per row. In the dimension they would make it as big as the fact.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Downtown anchored at Fountain Square, verified against the data             | Fountain Square (39.1011, −84.5125) is Cincinnati's central public square and the conventional centre of the CBD, so it needs no arbitrary choice to defend. It was checked against this dataset rather than taken on trust: the median coordinate of the 5XX VINE ST block (Fountain Square's own block, n=256) is 70 m away, and the median of the whole`C. B. D. / RIVERFRONT` neighborhood (n=30,766) is 120 m away. Both independent estimates land inside the published coordinate fuzz, which is as close as this data can resolve.                                                                                                                                                                                                        |
+| Distance kept raw per row, aggregated to a median per cell                  | The two uses need different treatment. On the fact the honest thing is the row's own distance, left noisy and documented as such. In the panel a feature has to be stable, so the cell's centre is the marginal median of its crash coordinates — the fuzz (~106 m) and the ~3.7% of rows that sit over 2 km from their own address block both wash out of a median over hundreds of crashes, where a mean would chase them.                                                                                                                                                                                                                                                                                                                        |
+| Panel is a table, not a view                                                | Training reads a stable snapshot, reads are cheap, and publishing waits for the assertions to pass.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Forecast target is the next 7 days per`cpd_neighborhood`                  | Daily counts at neighborhood grain are too sparse to model: 0.84 per cell-day with 54% zeros, so a next-day model predicts 0 or 1 and shows no skill over a seasonal baseline. Weekly totals average ~6 per cell.`cpd_neighborhood` is the reporting agency's own geography and the least sparse of the three schemes. The panel carries the label as `crashes_next_7` (NULL for the last 7 days, where the window would return a short sum), checked on every build against a recomputation from the following seven days. The panel stays event-time, so lagging the features to the forecast issue time and swapping observed weather for a forecast belong in the training code, where the issue time is known. See `crash-panel-spec.md`. |
+| A neighborhood joins the panel after 100 crashes, not on first sight        | One misspelling, or one crash geocoded into a place the city doesn't use, would otherwise add a cell that is almost entirely zeros and drag down every pooled model. The threshold is self-maintaining, where a fixed list would need editing whenever the city changes its geography, and the panel report prints every held-out neighborhood with its count so a real one sitting just under the line stays visible.                                                                                                                                                                                                                                                                                                                               |
+| Panel is fully rebuilt each load, not incrementally                         | Rolling features and zero-filled cells depend on neighboring days. A late or amended crash changes`lag_7`, `roll_28`, `roll_91` and `lag_364` for up to a year of later rows in its cell. At about 200K rows a rebuild takes seconds, while an incremental version would need to recompute a trailing window anyway.                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Holidays flag both actual and observed dates                                | July 4 traffic happens on the 4th even when the day off is the 3rd.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 ---
 
 ## Files
 
-| File | Role |
-|---|---|
-| `Get_Data.py` | Extract. `fetch(since=None)` pages the Socrata v3 API via POST, verifies the extract against the source's count, publish stamp and schema, and returns raw strings. |
-| `Load_to_GBQ.py` | Load. Renames columns, forces STRING and `WRITE_TRUNCATE`s `crashes.stg_crash_person` (import only; loads run through `Run_Pipeline.py`). |
-| `Pipeline_Config.py` | Validated project, dataset and location; rewrites `crashes.` in the SQL to the configured dataset; best-effort job time limit. |
-| `Star_Schema_ETL.sql` | Transform: DDL, cleaning view, staging validation, merges, fact load, checks, views, audit log, lease. |
-| `ML_Crash_Panel.sql` | ML panel: external feature tables, the ASSERT-gated panel build, and a report. |
-| `Run_Pipeline.py` | Orchestration and CLI. Holds the lease, runs the SQL section by section, passes query parameters and records the outcome. |
-| `tests/test_regressions.py` | Offline tests (no credentials or network): extraction checks, staging schema, config and rendering, label grammar, CLI rules. `python -m unittest discover -s tests` |
-| `tests/test_lock_safety.py` | Offline tests for the writer lock: acquisition, outcome tracking, and the takeover attempts that must fail. Same runner. |
-| `tests/integration_bigquery.py` | End-to-end test on a throwaway clone of the dataset: 56 checks, about 30 minutes, needs credentials. Run command in its docstring. |
-| `DEPLOY.md` | Step-by-step Cloud Run deployment: every command in order, each with a verification. The design behind it is in [Deployment](#deployment). |
-| `OPERATIONS.md` | How the deployed pipeline behaves: what triggers it (Cloud Scheduler, not GitHub), what happens inside a run, the resource inventory, what is verified vs assumed, and the gotchas found while deploying it. |
-| `deploy/watchdog.sql` | Daily health check (14:00 UTC) run as a BigQuery scheduled query. Four guards: a stuck lease, a stalled pipeline, a stale feed, and a feed that republishes without advancing. A tripped guard fails the run, and the failed run is what sends the mail. |
-| `deploy/create_watchdog.py` | Updates and reports on that scheduled query. It cannot *create* one owned by a person — that needs an OAuth consent flow only the BigQuery console runs — and a service-account-owned config can never send mail. |
-| `deploy/alert_job_failed.json` | The Cloud Monitoring policy for a failed Cloud Run execution, kept as a file so the filter and aggregation are reviewable rather than buried in a console form. |
-| `.github/workflows/deploy.yml` | On push to `main` touching anything that reaches the image: offline suite, then build, push and point both jobs at the new digest, authenticating through Workload Identity Federation. **Live** — a non-docs push now changes production. |
-| `crash-panel-spec.md` | Spec for the ML panel and the modeling plan (written as a pandas plan; the panel is built in BigQuery instead). |
-| `AUDIT.md` | Two-model audits of the project (2026-09-19 and 2026-10-01) and what each one changed. |
-| `TODO.md` | Open tasks. |
-| `requirements.txt` | Pinned direct runtime dependencies. |
-| `constraints.txt` | Every transitive package pinned to the tested versions; the image installs under it. |
-| `requirements-dev.txt` | Runtime dependencies plus notebook packages. |
-| `Dockerfile`, `.dockerignore` | Batch image for the Cloud Run Job, base pinned by digest. |
-| `Get_Data.ipynb` | Scratch notebook. Uses the old single GET that downloads all ~435 MB. |
+| File                              | Role                                                                                                                                                                                                                                                     |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Get_Data.py`                   | Extract.`fetch(since=None)` pages the Socrata v3 API via POST, verifies the extract against the source's count, publish stamp and schema, and returns raw strings.                                                                                     |
+| `Load_to_GBQ.py`                | Load. Renames columns, forces STRING and`WRITE_TRUNCATE`s `crashes.stg_crash_person` (import only; loads run through `Run_Pipeline.py`).                                                                                                           |
+| `Pipeline_Config.py`            | Validated project, dataset and location; rewrites`crashes.` in the SQL to the configured dataset; best-effort job time limit.                                                                                                                          |
+| `Star_Schema_ETL.sql`           | Transform: DDL, cleaning view, staging validation, merges, fact load, checks, views, audit log, lease.                                                                                                                                                   |
+| `ML_Crash_Panel.sql`            | ML panel: external feature tables, the ASSERT-gated panel build, and a report.                                                                                                                                                                           |
+| `Run_Pipeline.py`               | Orchestration and CLI. Holds the lease, runs the SQL section by section, passes query parameters and records the outcome.                                                                                                                                |
+| `tests/test_regressions.py`     | Offline tests (no credentials or network): extraction checks, staging schema, config and rendering, label grammar, CLI rules.`python -m unittest discover -s tests`                                                                                    |
+| `tests/test_lock_safety.py`     | Offline tests for the writer lock: acquisition, outcome tracking, and the takeover attempts that must fail. Same runner.                                                                                                                                 |
+| `tests/integration_bigquery.py` | End-to-end test on a throwaway clone of the dataset: 56 checks, about 30 minutes, needs credentials. Run command in its docstring.                                                                                                                       |
+| `DEPLOY.md`                     | Step-by-step Cloud Run deployment: every command in order, each with a verification. The design behind it is in[Deployment](#deployment).                                                                                                                 |
+| `OPERATIONS.md`                 | How the deployed pipeline behaves: what triggers it (Cloud Scheduler, not GitHub), what happens inside a run, the resource inventory, what is verified vs assumed, and the gotchas found while deploying it.                                             |
+| `deploy/watchdog.sql`           | Daily health check (14:00 UTC) run as a BigQuery scheduled query. Four guards: a stuck lease, a stalled pipeline, a stale feed, and a feed that republishes without advancing. A tripped guard fails the run, and the failed run is what sends the mail. |
+| `deploy/create_watchdog.py`     | Updates and reports on that scheduled query. It cannot*create* one owned by a person — that needs an OAuth consent flow only the BigQuery console runs — and a service-account-owned config can never send mail.                                     |
+| `deploy/alert_job_failed.json`  | The Cloud Monitoring policy for a failed Cloud Run execution, kept as a file so the filter and aggregation are reviewable rather than buried in a console form.                                                                                          |
+| `.github/workflows/deploy.yml`  | On push to`main` touching anything that reaches the image: offline suite, then build, push and point both jobs at the new digest, authenticating through Workload Identity Federation. **Live** — a non-docs push now changes production.       |
+| `crash-panel-spec.md`           | Spec for the ML panel and the modeling plan (written as a pandas plan; the panel is built in BigQuery instead).                                                                                                                                          |
+| `AUDIT.md`                      | Two-model audits of the project (2026-09-19 and 2026-10-01) and what each one changed.                                                                                                                                                                   |
+| `TODO.md`                       | Open tasks.                                                                                                                                                                                                                                              |
+| `requirements.txt`              | Pinned direct runtime dependencies.                                                                                                                                                                                                                      |
+| `constraints.txt`               | Every transitive package pinned to the tested versions; the image installs under it.                                                                                                                                                                     |
+| `requirements-dev.txt`          | Runtime dependencies plus notebook packages.                                                                                                                                                                                                             |
+| `Dockerfile`, `.dockerignore` | Batch image for the Cloud Run Job, base pinned by digest.                                                                                                                                                                                                |
+| `Get_Data.ipynb`                | Scratch notebook. Uses the old single GET that downloads all ~435 MB.                                                                                                                                                                                    |
 
 ### SQL section map
 
 `Star_Schema_ETL.sql`:
 
-| Section | Runs | Contents |
-|---|---|---|
-| 1 | `--setup` | Staging, dimension, fact and `etl_load_log` DDL; `ALTER` migrations; cleaning view |
-| 2 | `--setup` | Generated calendar, `dim_time` and unknown members (guarded) |
-| 3 | Every load | Staging validation, before any change; the watermark explanation (`@window_start`, `@expected_rows`, `@publish_stamp`) |
-| 4 | Every load | Dimension `MERGE`s and key assertions (`@reprocess`) |
-| 5 | Every load | Fact load: crash-level replace, delete reconciliation and the log row, in one transaction fenced by the lease |
-| 6 | Every load | Sanity checks (printed) |
-| 7 | `--setup` | Role-playing date views |
-| 8 | Retired | Folded into Section 5 |
-| 9 | Every load, last | Mark the load `succeeded` |
-| 10 | `--setup`, first | `etl_lease` table and its one row |
-| 11 | When a load fails | Mark the load `failed` (inserts the row if the fact never committed) |
+| Section | Runs               | Contents                                                                                                                     |
+| ------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| 1       | `--setup`        | Staging, dimension, fact and`etl_load_log` DDL; `ALTER` migrations; cleaning view                                        |
+| 2       | `--setup`        | Generated calendar,`dim_time` and unknown members (guarded)                                                                |
+| 3       | Every load         | Staging validation, before any change; the watermark explanation (`@window_start`, `@expected_rows`, `@publish_stamp`) |
+| 4       | Every load         | Dimension`MERGE`s and key assertions (`@reprocess`)                                                                      |
+| 5       | Every load         | Fact load: crash-level replace, delete reconciliation and the log row, in one transaction fenced by the lease                |
+| 6       | Every load         | Sanity checks (printed)                                                                                                      |
+| 7       | `--setup`        | Role-playing date views                                                                                                      |
+| 8       | Retired            | Folded into Section 5                                                                                                        |
+| 9       | Every load, last   | Mark the load`succeeded`                                                                                                   |
+| 10      | `--setup`, first | `etl_lease` table and its one row                                                                                          |
+| 11      | When a load fails  | Mark the load`failed` (inserts the row if the fact never committed)                                                        |
 
 `ML_Crash_Panel.sql`:
 
-| Section | Contents |
-|---|---|
-| 1 | `ml_weather_daily` and `ml_cell_attributes` DDL (idempotent) |
-| 2 | Settings, crash-level rollup, cell threshold, per-cell distance to downtown, holidays, spine, features, the `crashes_next_7` target, `ASSERT`s, publish |
-| 3 | Panel report: size, zero fraction, dispersion, target coverage, nearest and farthest cells, split sizes, crashes whose rows disagree on day or cell, neighborhoods held out by the threshold |
+| Section | Contents                                                                                                                                                                                     |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1       | `ml_weather_daily` and `ml_cell_attributes` DDL (idempotent)                                                                                                                             |
+| 2       | Settings, crash-level rollup, cell threshold, per-cell distance to downtown, holidays, spine, features, the`crashes_next_7` target, `ASSERT`s, publish                                   |
+| 3       | Panel report: size, zero fraction, dispersion, target coverage, nearest and farthest cells, split sizes, crashes whose rows disagree on day or cell, neighborhoods held out by the threshold |
 
 ---
 
@@ -1048,6 +1055,7 @@ feed:
   WHERE load_id = 'the-verified-stopped-load-id' AND status = 'fact_committed';
   ```
 - **What a failed load leaves behind.**
+
   - A failure before Section 5 commits changes nothing in the fact. Staging
     and any brand-new dimension members may have changed, which is harmless.
   - A confirmed failure after fact commit leaves the fact updated. The panel
@@ -1074,8 +1082,7 @@ feed:
   `CREATE TABLE crashes.ml_crash_panel_20260910 COPY crashes.ml_crash_panel`.
 - **There is no service-account key any more.** One used to sit in this
   OneDrive-synced folder; DEPLOY.md step 11 retired it, and local runs use
-  your own application-default credentials. If `gcloud auth
-  application-default login` has expired, a local run fails at
+  your own application-default credentials. If `gcloud auth application-default login` has expired, a local run fails at
   `DefaultCredentialsError` rather than anything pipeline-shaped.
 - **`APP_ENV` and `GOOGLE_CLOUD_RUN_REGION_ENDPOINT` in `.env`** aren't read
   by any code.
@@ -1096,15 +1103,15 @@ feed:
 
 In rough priority order, from `TODO.md` and the panel spec:
 
-- [x] **Scheduled cloud refresh.** Running since 2026-10-02: `--delta`
-      Mon–Sat and `--full` Sun, both 06:00 America/New_York, with a daily
-      watchdog. What is left is hardening — steps 10 and 11 and Workload
-      Identity Federation, tracked under [Deployment status](#status).
+- [X] **Scheduled cloud refresh.** Running since 2026-10-02: `--delta`
+  Mon–Sat and `--full` Sun, both 06:00 America/New_York, with a daily
+  watchdog. What is left is hardening — steps 10 and 11 and Workload
+  Identity Federation, tracked under [Deployment status](#status).
 - [ ] Load `ml_cell_attributes` (OSM road miles, ODOT AADT, ACS) so exposure
-      becomes a real rate denominator
+  becomes a real rate denominator
 - [ ] Load `ml_weather_daily` (NOAA, one station)
 - [ ] Before training for forecasting, in the training code rather than the
-      panel:
+  panel:
   - lag the features to the forecast issue time — the panel is event-time by
     design, and the binding constraint is the **publication** lag, measured at
     39 days on 2026-10-02 (the newest crash day stops dead at 2026-08-24 and a
@@ -1121,7 +1128,7 @@ In rough priority order, from `TODO.md` and the panel spec:
   - [ ] PAI on the test year
 - [ ] Choose a user interface for ML predictions and crash analytics
 - [ ] Later grains once neighborhood × day is validated: hex grid, sub-daily
-      bins, road segments, severity modeling
+  bins, road segments, severity modeling
 
 ---
 
