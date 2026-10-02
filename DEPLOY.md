@@ -306,13 +306,38 @@ the first cloud delta, which found 0 new and 0 changed with `MAX(crash_date)`
 unmoved. Guard 3 watches whether the city is publishing; guard 4 watches
 whether any of it is new.
 
-Install it, running as the runtime account so the check does not stop working
-when your own credentials expire:
+Install it **owned by you**, not by the runtime service account:
 
 ```powershell
 pip install google-cloud-bigquery-datatransfer
-python deploy/create_watchdog.py --service-account $RUNTIME_SA
+python deploy/create_watchdog.py --as-me
 ```
+
+Running it as the service account looks tidier and was the first thing tried
+here. It does not work. The failure notification goes to the transfer
+config's owner, a service account has no mailbox, and `owner_info` comes back
+empty — so the query fails on schedule, correctly, and tells nobody.
+Confirmed on 2026-10-02: a forced failure produced no mail at all.
+
+The objection to owning it yourself is that the schedule then depends on your
+credentials. That is real but much smaller than it sounds, because it fails
+in the safe direction: if those credentials stop working the run fails, and a
+failed run mails you. A watchdog that breaks loudly is recoverable; one that
+cannot reach anyone is not.
+
+If you later want it off a personal account entirely, the route is a Pub/Sub
+notification topic plus a Cloud Monitoring notification channel, which routes
+anywhere and keeps the service-account runner. More moving parts, so it is
+not the starting point.
+
+Check who it belongs to at any time — no flags means report, not change:
+
+```powershell
+python deploy/create_watchdog.py
+```
+
+That prints the schedule, whether failure email is on, **who the mail
+reaches**, and whether the deployed query still matches `watchdog.sql`.
 
 Or by hand: BigQuery console → paste `deploy/watchdog.sql` → **Schedule** →
 repeat every 1 hour → leave the destination table empty (it is a script) →

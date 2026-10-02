@@ -8,15 +8,15 @@ and so a changed watchdog.sql can be pushed without re-clicking it.
     python deploy/create_watchdog.py --service-account crash-etl-runtime@PROJECT.iam.gserviceaccount.com
     python deploy/create_watchdog.py --update --service-account ...   # after editing watchdog.sql
 
-It runs as the runtime service account so the check does not quietly stop
-working when a person's credentials expire.
+Install it with --as-me, owned by you. Running it as the runtime service
+account was tried first and does not work: the failure notification follows
+the transfer config's owner, a service account has no mailbox, owner_info
+comes back empty, and the mail goes nowhere. Confirmed 2026-10-02 by forcing
+a failure and receiving nothing.
 
-Where the failure mail lands is worth confirming rather than assuming. The
-notification follows the transfer config's owner, and running the query as a
-service account makes that worth testing once -- a service account has no
-inbox. DEPLOY.md step 8 has a safe way to force a failure and see whether the
-mail arrives. If it does not, rerun with --as-me, which keeps the alert tied
-to your own account at the cost of depending on your credentials.
+Owning it yourself ties the schedule to your credentials, which fails in the
+safe direction -- if they stop working the run fails, and a failed run mails
+you. Running with no flags reports who the mail currently reaches.
 """
 
 import argparse
@@ -69,6 +69,10 @@ def main():
     parser.add_argument('--run-now', action='store_true',
                         help='also trigger a run immediately instead of waiting for '
                              'the next scheduled one')
+    parser.add_argument('--recreate', action='store_true',
+                        help='delete the existing watchdog and create it again. Needed '
+                             'to change who owns it, which is who the failure mail '
+                             'reaches; --update cannot move ownership.')
     args = parser.parse_args()
 
     # dotenv_values, not load_dotenv: .env sets GOOGLE_APPLICATION_CREDENTIALS
@@ -84,10 +88,6 @@ def main():
 
     service_account = None if args.as_me else (
         args.service_account or os.getenv('WATCHDOG_SERVICE_ACCOUNT'))
-    if not service_account and not args.as_me:
-        sys.exit('Pass --service-account, or set WATCHDOG_SERVICE_ACCOUNT. Running the '
-                 'watchdog as a person ties the alert to that person\'s credentials; '
-                 'pass --as-me if you have decided that is what you want.')
 
     sql = TEST_SQL if args.test_alert else SQL_PATH.read_text(encoding='utf-8')
     client = bigquery_datatransfer.DataTransferServiceClient()
@@ -96,12 +96,35 @@ def main():
     existing = next((t for t in client.list_transfer_configs(parent=parent)
                      if t.display_name == DISPLAY_NAME), None)
 
+    if existing and args.recreate:
+        client.delete_transfer_config(name=existing.name)
+        print(f'Deleted {existing.name}')
+        existing = None
+
     if existing and not args.update:
+        owner = existing.owner_info.email if existing.owner_info else ''
+        installed = existing.params.get('query', '').strip()
+        matches = installed == SQL_PATH.read_text(encoding='utf-8').strip()
         print(f'Already exists: {existing.name}\n'
-              f'  schedule: {existing.schedule}\n'
-              f'  failure email: {existing.email_preferences.enable_failure_email}\n'
-              'Rerun with --update to push a changed watchdog.sql.')
+              f'  schedule      : {existing.schedule}\n'
+              f'  failure email : {existing.email_preferences.enable_failure_email}\n'
+              f'  mail goes to  : {owner or "NOBODY - owned by a service account"}\n'
+              f'  query         : {"matches watchdog.sql" if matches else "DIFFERS from watchdog.sql"}')
+        if not owner and existing.email_preferences.enable_failure_email:
+            print('  WARNING: failure email is on but there is no owner address, so no\n'
+                  '  mail can be sent. Recreate it owned by you:\n'
+                  '    python deploy/create_watchdog.py --recreate --as-me')
+        if not matches:
+            print('  WARNING: the deployed query is not the one in this repo.\n'
+                  '    python deploy/create_watchdog.py --update --service-account <SA>')
+        print('Rerun with --update to push a changed watchdog.sql.')
         return
+
+    # Only creating or updating needs to decide who runs it.
+    if not service_account and not args.as_me:
+        sys.exit('Pass --service-account, or set WATCHDOG_SERVICE_ACCOUNT. Running the '
+                 'watchdog as a person ties the alert to that person\'s credentials; '
+                 'pass --as-me if you have decided that is what you want.')
 
     config = bigquery_datatransfer.TransferConfig(
         display_name=DISPLAY_NAME,
