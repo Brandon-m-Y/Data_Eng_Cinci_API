@@ -476,11 +476,18 @@ not task attempts: with `--max-retries=1` a run that fails once and succeeds
 on the retry does not alert, which is what you want.
 
 The notification channel has to exist first, because the policy refers to it
-by id. `gcloud alpha monitoring` is not installed by default:
+by id. `gcloud alpha monitoring` is not installed by default. **Install it
+without `--quiet`** and answer the prompt:
 
 ```powershell
-gcloud components install alpha --quiet
+gcloud components install alpha
 ```
+
+`--quiet` makes this fail. The installer would be replacing the bundled
+Python it is itself running on, and the interactive prompt is what handles
+that; suppressing the prompt turns it into
+`Cannot use bundled Python installation to update Google Cloud CLI in
+non-interactive mode`. Confirmed 2026-10-02.
 
 ```powershell
 $CHANNEL = (gcloud alpha monitoring channels create --display-name="crash-etl alerts" --type=email --channel-labels=email_address=brandonmichealytuarte@gmail.com --format="value(name)")
@@ -515,6 +522,20 @@ gcloud alpha monitoring policies list --format="table(displayName,enabled,notifi
 One policy, enabled, with your channel attached. Google also sends a
 confirmation mail when the channel is created; receiving it proves delivery,
 which is the part worth checking.
+
+**Prove it delivers.** A policy that has never fired is an assumption, the
+same as the watchdog's email was until it was tested. Force one failed
+execution: an unknown flag makes `argparse` exit before `Config.from_env()`
+or `get_client()` run, so nothing is read, written or leased.
+
+```powershell
+gcloud run jobs execute crash-etl-delta --args=--force-a-failure --region=$REGION --wait
+```
+
+Both attempts fail immediately (`--max-retries=1`), the execution is counted
+`result=failed`, and the mail should arrive within about five minutes.
+`--args` overrides this execution only; the job definition is untouched, and
+the next scheduled run is a normal `--delta`.
 
 The console does the same thing: Monitoring → Alerting → **Create policy** →
 metric `run.googleapis.com/job/completed_execution_count` on resource **Cloud

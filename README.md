@@ -384,10 +384,19 @@ On Windows, Docker Desktop needs WSL 2. If its engine won't start, run
       America/New_York. End-to-end verified 2026-10-02 by firing one by hand
       — trigger to execution in one second, finishing `succeeded` with the
       lease released.
-- [ ] Cloud Monitoring policy for failed executions (step 10)
-- [ ] Retire the local service-account key for ADC (step 11)
-- [ ] Workload Identity Federation, so the GitHub Actions workflow can run
-      (DEPLOY.md Appendix A); the workflow is written but not yet exercised
+- [x] Cloud Monitoring policy for failed executions (step 10): an email
+      channel and `crash-etl job failed`, both enabled. Installed from
+      [deploy/alert_job_failed.json](deploy/alert_job_failed.json), so the
+      filter and aggregation are in the repo rather than in a console form.
+      It has not yet been made to fire
+- [x] Local service-account key retired (step 11). The only user-managed key
+      in the project is deleted and the JSON is off the disk; local runs use
+      your application-default credentials, the same `get_client()` branch
+      Cloud Run takes
+- [x] Workload Identity Federation (Appendix A): pool, provider restricted to
+      `Brandon-m-Y/Data_Eng_Cinci_API` by attribute condition, deployer
+      account, and the three repository variables. The deploy job is no
+      longer skipped; it has not yet run
 
 ---
 

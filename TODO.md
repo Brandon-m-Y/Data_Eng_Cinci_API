@@ -101,9 +101,23 @@ Remaining, in order:
 - [x] Cloud Scheduler triggers live (step 9). Verified by firing one by
       hand: scheduler at 20:10:21, Cloud Run execution at 20:10:22, fact
       committed, panel rebuilt, `succeeded`, lease released. 184s.
-- [ ] Cloud Monitoring policy for failed executions (step 10)
-- [ ] Retire the local service-account key for ADC (step 11)
-- [ ] Workload Identity Federation, then let the workflow deploy (Appendix A)
+- [x] Cloud Monitoring policy for failed executions (step 10). Email channel
+      and policy both enabled, installed from `deploy/alert_job_failed.json`.
+- [x] Local service-account key retired (step 11). No user-managed keys left
+      in the project, no JSON on disk, local runs on ADC.
+- [x] Workload Identity Federation (Appendix A). Pool and provider exist,
+      the provider only accepts this one repository, and the three repo
+      variables are set, so the deploy job is live.
+
+Left over from those, both the same kind of gap: installed but never
+exercised.
+
+- [ ] Make the monitoring policy fire once, the way the watchdog's email was
+      proved. `gcloud run jobs execute crash-etl-delta --args=--force-a-failure
+      --region=us-east1 --wait` fails in argparse before any client is built.
+- [ ] Run the deploy workflow by hand once (`gh workflow run "Build and
+      deploy"`) and record the digest it lands on, before a code push does it
+      unattended.
 
 Open questions DEPLOY.md does not answer:
 

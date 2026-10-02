@@ -21,16 +21,22 @@ The two paths are completely separate, and only the second one runs on a
 schedule:
 
 ```
- PATH 1 - code changes (manual today)
- ─────────────────────────────────────
- push to main
+ PATH 1 - code changes
+ ─────────────────────
+ push to main (a non-.md file)
      │
      ├─► GitHub Actions: `test` job — 51 offline tests on Ubuntu/Python 3.13
      │
-     └─► GitHub Actions: `deploy` job — SKIPPED (see note below)
-             would build the image, push it, and repoint both jobs
+     └─► GitHub Actions: `deploy` job — gated on `test` passing
+             │  mints a short-lived Google token through Workload
+             │  Identity Federation; no key is stored anywhere
+             │
+             ├─► docker build, push to Artifact Registry (tag = commit SHA)
+             │
+             └─► gcloud run jobs update, both jobs, by digest
 
- Today the image is built and pushed by hand (DEPLOY.md step 5).
+ This still only changes which image the jobs run. It never runs the
+ pipeline. Armed on 2026-10-02; it has not yet run.
 
 
  PATH 2 - the pipeline actually running (live, unattended)
@@ -57,7 +63,7 @@ schedule:
  your inbox
 ```
 
-### Why the deploy job is skipped
+### What arms the deploy job, and what that costs you
 
 The `deploy` job is gated on a repository variable:
 
@@ -65,18 +71,27 @@ The `deploy` job is gated on a repository variable:
 if: ${{ vars.GCP_WIF_PROVIDER != '' }}
 ```
 
-That variable is not set, because Workload Identity Federation has not been
-configured ([DEPLOY.md](DEPLOY.md) Appendix A). Until it is, the job is
-skipped and the workflow stays green.
+It was skipped from the day it was written until 2026-10-02, when Workload
+Identity Federation was configured ([DEPLOY.md](DEPLOY.md) Appendix A) and
+the three variables were set. **Setting `GCP_WIF_PROVIDER` is the switch.**
+
+From that point, any push to `main` touching a non-`.md` file rebuilds the
+image and repoints both jobs, gated only by the 51 offline tests — the
+integration suite does not run in CI, because it needs credentials and takes
+about thirty minutes. So: **pushing code now changes production.** Run
+`tests/integration_bigquery.py` locally before pushing a change to the SQL or
+the runner.
 
 It was not always gated. For three pushes it ran and failed at the auth step,
-emailing a failure each time. Gating it was the fix: skipped is honest, failed
-is noise. Setting the three repository variables in Appendix A turns
-deployment on with no further change to the workflow.
+emailing a failure each time. Gating it was the fix: skipped is honest,
+failed is noise.
 
 **This repository is public, so a service-account JSON key must never be used
 in CI.** That is why the path is Workload Identity Federation rather than a
-stored secret.
+stored secret. The provider carries an attribute condition,
+`assertion.repository=='Brandon-m-Y/Data_Eng_Cinci_API'`, and that is the
+part that matters: without it, any repository on GitHub could request a
+token for the deployer account.
 
 ---
 
@@ -196,10 +211,23 @@ looks correct in every readout. Details in the gotchas below.
 
 ### Cloud Run job failures
 
-Watchdog guard 2 catches a crashed job within ~24 hours. A Cloud Monitoring
-policy on `run.googleapis.com/job/completed_execution_count` with
-`result = failed` makes that minutes instead. **Not yet configured** —
-[DEPLOY.md](DEPLOY.md) step 10.
+Watchdog guard 2 catches a crashed job within ~24 hours. The Cloud
+Monitoring policy `crash-etl job failed` makes that minutes instead. It is
+installed and enabled as of 2026-10-02, with an email channel to the project
+owner.
+
+It is defined in [deploy/alert_job_failed.json](deploy/alert_job_failed.json)
+rather than clicked into a console form, so the filter and aggregation are
+reviewable: `completed_execution_count`, `result = failed`, summed over five
+minutes and grouped by job name, with a 30-minute auto-close.
+
+That metric counts **executions**, not task attempts. Both jobs run with
+`--max-retries=1`, so a run that fails once and succeeds on the retry does
+not alert — only a genuinely failed execution does.
+
+**It has never fired.** The same gap the watchdog email had before it was
+tested. [DEPLOY.md](DEPLOY.md) step 10 has a safe way to force one: an
+unknown flag makes `argparse` exit before any BigQuery client is built.
 
 ---
 
@@ -226,7 +254,8 @@ region as the BigQuery dataset.
 |---|---|---|
 | `crash-etl-runtime` | `bigquery.jobUser`, `bigquery.dataEditor` (project); `secretmanager.secretAccessor` (that one secret) | Runs both jobs |
 | `crash-etl-scheduler` | `run.invoker` on each job, **nothing at project level** | Can start those two jobs and do nothing else |
-| `cinci-crash-etl` | `bigquery.jobUser`, `bigquery.dataEditor` | **Legacy.** Owns the local JSON key. To be retired — DEPLOY.md step 11 |
+| `cinci-crash-etl` | `bigquery.jobUser`, `bigquery.dataEditor` | **Legacy, and now keyless.** Its JSON key was deleted 2026-10-02 (step 11). Nothing uses the account; disabling it is the reversible way to confirm that |
+| `crash-etl-deployer` | `artifactregistry.writer`, `run.developer`, `serviceAccountUser` on `crash-etl-runtime` | What GitHub Actions impersonates through federation. Has no key |
 
 `bigquery.jobUser` has to be project-level; that is where the right to start a
 job lives. `bigquery.dataEditor` is project-level because this project holds
@@ -307,7 +336,10 @@ Being specific about this matters more than a green checklist.
   Inserts, deletions and the deletion cap have not run in the cloud. The first
   Sunday full load is the real test.
 - The `crash-etl-full` job has never run at all — only `crash-etl-delta`.
-- The GitHub Actions deploy job, which needs WIF.
+- **The GitHub Actions deploy job.** Workload Identity Federation is now
+  configured and the job is armed, but it has not run once. The first run
+  will repoint both jobs at a freshly built digest.
+- **The Cloud Monitoring alert.** Installed, enabled, never fired.
 - Recovery from a genuinely stuck lease, which has only been reasoned about.
 
 ---
@@ -381,13 +413,18 @@ the full cap is 2,213. Neither is close to binding.
 
 ## Still to do
 
-- **Retire the local service-account key** (DEPLOY.md step 11). The cloud no
-  longer needs it, and it is now the weakest thing in the setup.
-- **Cloud Monitoring alert** on failed job executions (step 10).
-- **Workload Identity Federation**, which turns the GitHub deploy job on
-  (Appendix A).
+Steps 10 and 11 and Appendix A were all completed on 2026-10-02: the local
+key is destroyed, the failure alert is installed, and federation is
+configured. What is left is proving the two new things work and watching the
+first full load.
+
+- **Make the monitoring alert fire once**, the way the watchdog's email was
+  proved (step 10).
+- **Run the deploy workflow by hand once** and record the digest it lands on,
+  before an ordinary code push does it unattended.
 - **Watch Sunday's full load** — the first exercise of the full write path in
-  the cloud.
+  the cloud, and the thing that still matters most.
+- Optional: disable `cinci-crash-etl`, now that it is keyless and unused.
 
 Open work beyond deployment is in [TODO.md](TODO.md).
 
