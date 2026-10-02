@@ -1,0 +1,33 @@
+{
+  "displayName": "crash-etl job failed",
+  "documentation": {
+    "mimeType": "text/markdown",
+    "content": "A Cloud Run job execution for the crash ETL finished with `result=failed`.\n\nThis fires within minutes. Watchdog guard 2 covers the same ground but only once a day, so this is the fast path, not the only one.\n\nThe metric counts *executions*, not task attempts. Both jobs run with `--max-retries=1`, so an execution is only counted failed after both attempts have failed -- a single retried-then-succeeded attempt does not alert.\n\nWhat to do:\n\n1. `gcloud run jobs executions list --job=crash-etl-delta --region=us-east1` (or `crash-etl-full`) to find the execution.\n2. `gcloud run jobs executions describe <name> --region=us-east1` and read the logs.\n3. Check the writer lease: a crashed run can leave `crashes.etl_lease` held. `SELECT * FROM crashes.etl_lease` -- if a dead run owns it, clear that holder by name once its jobs are confirmed terminal. See README.md on the single-writer lease.\n\nDefined in deploy/alert_job_failed.json; DEPLOY.md step 10 installs it."
+  },
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "A crash-etl job execution failed",
+      "conditionThreshold": {
+        "filter": "resource.type = \"cloud_run_job\" AND metric.type = \"run.googleapis.com/job/completed_execution_count\" AND metric.label.result = \"failed\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM",
+            "groupByFields": ["resource.label.job_name"]
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {"count": 1}
+      }
+    }
+  ],
+  "alertStrategy": {
+    "autoClose": "1800s"
+  },
+  "notificationChannels": ["CHANNEL_PLACEHOLDER"],
+  "enabled": true
+}

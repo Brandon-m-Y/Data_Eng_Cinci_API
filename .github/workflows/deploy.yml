@@ -15,8 +15,14 @@ name: Build and deploy
 on:
   push:
     branches: [main]
+    # Nothing here reaches the image: the Dockerfile copies only the runner,
+    # its modules and the two SQL files. A change to the docs, to the
+    # deploy/ helpers or to .gitignore cannot change what the jobs run, so
+    # rebuilding and repointing them would only churn the digest.
     paths-ignore:
       - '**.md'
+      - 'deploy/**'
+      - '.gitignore'
   workflow_dispatch:
 
 # id-token: write is what lets the job mint a short-lived Google token.
