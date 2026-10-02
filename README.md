@@ -393,10 +393,11 @@ On Windows, Docker Desktop needs WSL 2. If its engine won't start, run
       in the project is deleted and the JSON is off the disk; local runs use
       your application-default credentials, the same `get_client()` branch
       Cloud Run takes
-- [x] Workload Identity Federation (Appendix A): pool, provider restricted to
-      `Brandon-m-Y/Data_Eng_Cinci_API` by attribute condition, deployer
-      account, and the three repository variables. The deploy job is no
-      longer skipped; it has not yet run
+- [x] Workload Identity Federation (Appendix A): pool, provider restricted
+      to `Brandon-m-Y/Data_Eng_Cinci_API` by attribute condition, deployer
+      account, and the three repository variables. The deploy job has run
+      end to end — built, pushed, and repointed both jobs at
+      `sha256:fb7fbf44…` with no stored credential anywhere
 
 ---
 

@@ -115,9 +115,9 @@ exercised.
 - [ ] Make the monitoring policy fire once, the way the watchdog's email was
       proved. `gcloud run jobs execute crash-etl-delta --args=--force-a-failure
       --region=us-east1 --wait` fails in argparse before any client is built.
-- [ ] Run the deploy workflow by hand once (`gh workflow run "Build and
-      deploy"`) and record the digest it lands on, before a code push does it
-      unattended.
+- [x] The deploy job has now run, twice, and both jobs sit on the digest it
+      built (`sha256:fb7fbf44...`, tag `7ade673`). Nothing has *executed*
+      that image yet — the Saturday 06:00 delta is the first to.
 
 Open questions DEPLOY.md does not answer:
 

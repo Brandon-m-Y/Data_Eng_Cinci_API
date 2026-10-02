@@ -36,7 +36,7 @@ schedule:
              └─► gcloud run jobs update, both jobs, by digest
 
  This still only changes which image the jobs run. It never runs the
- pipeline. Armed on 2026-10-02; it has not yet run.
+ pipeline. First ran 2026-10-02.
 
 
  PATH 2 - the pipeline actually running (live, unattended)
@@ -239,7 +239,7 @@ region as the BigQuery dataset.
 | Resource | Name | Notes |
 |---|---|---|
 | Artifact Registry | `crash-etl` | Docker, `us-east1` |
-| Image | `us-east1-docker.pkg.dev/cincinnati-open-crash-data/crash-etl/crash-etl` | Deployed by digest `sha256:cfd0f854…` |
+| Image | `us-east1-docker.pkg.dev/cincinnati-open-crash-data/crash-etl/crash-etl` | Deployed by digest `sha256:fb7fbf44…`, tagged `7ade673`. Built and pointed at by GitHub Actions |
 | Cloud Run Job | `crash-etl-delta` | `--delta`, 1 GiB, 1 CPU, 30 min |
 | Cloud Run Job | `crash-etl-full` | `--full`, 4 GiB, 2 CPU, 1 h |
 | Scheduler | `crash-etl-delta-mon-sat` | `0 6 * * 1-6` America/New_York |
@@ -336,10 +336,11 @@ Being specific about this matters more than a green checklist.
   Inserts, deletions and the deletion cap have not run in the cloud. The first
   Sunday full load is the real test.
 - The `crash-etl-full` job has never run at all — only `crash-etl-delta`.
-- **The GitHub Actions deploy job.** Workload Identity Federation is now
-  configured and the job is armed, but it has not run once. The first run
-  will repoint both jobs at a freshly built digest.
 - **The Cloud Monitoring alert.** Installed, enabled, never fired.
+- **The new image under a real load.** The deploy job has run and both jobs
+  now point at a digest GitHub built, but nothing has executed it. No file
+  that goes into the image changed, so it should behave identically; the
+  Saturday 06:00 delta is what will show that.
 - Recovery from a genuinely stuck lease, which has only been reasoned about.
 
 ---
@@ -420,8 +421,6 @@ first full load.
 
 - **Make the monitoring alert fire once**, the way the watchdog's email was
   proved (step 10).
-- **Run the deploy workflow by hand once** and record the digest it lands on,
-  before an ordinary code push does it unattended.
 - **Watch Sunday's full load** — the first exercise of the full write path in
   the cloud, and the thing that still matters most.
 - Optional: disable `cinci-crash-etl`, now that it is keyless and unused.
