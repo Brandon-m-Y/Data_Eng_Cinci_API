@@ -133,15 +133,29 @@ gcloud secrets create socrata-app-token --data-file="$env:TEMP\tok.txt" --replic
 Remove-Item "$env:TEMP\tok.txt"
 ```
 
-**Verify:** the stored length matches your local token exactly.
+**Verify before uploading.** Check the temp file's size on disk, because that
+is exactly what becomes the secret:
 
 ```powershell
 $tok.Length
-(gcloud secrets versions access latest --secret=socrata-app-token).Length
+(Get-Item "$env:TEMP\tok.txt").Length
 ```
 
-Those two numbers must be equal. If the second is larger by one or two, a
-newline got in; delete the secret and redo this step.
+Both must be the same number (25 for the current token). A file one or two
+bytes larger means a newline got in — fix it before creating the secret
+rather than after.
+
+`[IO.File]::WriteAllText` is what guarantees this: unlike `Out-File`,
+`Set-Content` or a pipe into `--data-file=-`, it appends no newline and
+writes no BOM. The byte count above confirms it rather than trusting it.
+
+Reading the secret back is a weaker check and should not be relied on alone —
+PowerShell strips a trailing newline when it captures native output, so a
+newline-corrupted secret still measures correct:
+
+```powershell
+(gcloud secrets versions access latest --secret=socrata-app-token).Length
+```
 
 ---
 
