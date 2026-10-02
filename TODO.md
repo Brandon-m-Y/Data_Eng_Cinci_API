@@ -3,12 +3,8 @@
 Completed work isn't listed here. The reasoning behind decisions already made
 lives in README.md under "Design decisions"; the audits are in AUDIT.md.
 
-## Production is behind the repository
-
-- Run `python Run_Pipeline.py --setup`, then `--full --reprocess`. This adds
-  and populates `fact_crash_person.distance_to_cbd_m` and applies paired
-  coordinate nulling (176 rows carry a single coordinate until it runs).
-  About 5 minutes. Until then the column exists and is NULL.
+Production is on the current schema as of 2026-10-01; nothing is pending
+there.
 
 ## Watch before scheduling anything unattended
 

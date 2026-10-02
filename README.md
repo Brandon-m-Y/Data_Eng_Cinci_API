@@ -69,16 +69,17 @@ As of 2026-10-01, BigQuery dataset `crashes` in `us-east1`:
 **Where things stand:**
 - **Pipeline:** complete, and run by hand from a local machine or the Docker
   image.
+- **Production matches the repository.** The last migration (`--setup`, then
+  `--full --reprocess`) ran 2026-10-01: all 221,289 crashes rewritten in
+  4m58s, `distance_to_cbd_m` populated for every row that has coordinates,
+  and the 176 single-coordinate rows resolved. A hash recomputation against
+  the current staging publish reports 0 new and 0 changed, so the next
+  `--delta` is a no-op.
 - **Deployment:** the container builds and runs locally. The GCP resources,
   CI/CD and schedule are not set up yet.
 - **ML:** the panel is built and validated, and carries its forecast label.
   External features (weather, AADT, population) and model training are not
   started.
-- **Pending on production:** the repository is ahead of the deployed dataset.
-  Run `--setup` and then `--full --reprocess` to add and populate
-  `fact_crash_person.distance_to_cbd_m` and to apply paired coordinate
-  nulling. Until then that column exists but is NULL, and 176 rows still
-  carry a single coordinate.
 
 **Verified behavior.** The whole suite runs against a fresh clone of
 production (`tests/integration_bigquery.py`, 56 checks, last green
@@ -336,8 +337,9 @@ On Windows, Docker Desktop needs WSL 2. If its engine won't start, run
 - [x] Audit hardening: verified extracts, staging validation, single-writer
       lease, deletion cap, run status, `--reprocess`, configurable dataset,
       locked dependencies and base image, BigQuery integration test
-- [ ] Run `--setup` then `--full --reprocess` on production, to add and
-      populate `distance_to_cbd_m` and apply paired coordinate nulling
+- [x] Production migrated to the current schema (`--setup`, then
+      `--full --reprocess`, 2026-10-01): `distance_to_cbd_m` populated and
+      coordinates nulled in pairs
 - [ ] GCP setup script: enable APIs, Artifact Registry repo, both service
       accounts, Secret Manager secret, Workload Identity Federation
 - [ ] Create the Cloud Run Job
@@ -462,9 +464,10 @@ That works out to about 1.96 people per crash.
 - **Lat/long** is per unit and lives on the fact, not the dimension. Values
   outside Hamilton County's bounds become NULL, **as a pair**: half a
   coordinate is not a location, and leaving one axis behind makes a row read
-  as located to anything that checks a single axis. 176 rows of 433K are
-  affected. Keeping exact coordinates off `dim_location` shrank it from about
-  1:1 with the fact to about 63,000 rows.
+  as located to anything that checks a single axis. 176 rows of 433K had one
+  axis and not the other; pairing cost no usable point, leaving 432,855 rows
+  with coordinates and 305 without. Keeping exact coordinates off
+  `dim_location` shrank it from about 1:1 with the fact to about 63,000 rows.
 - **`distance_to_cbd_m`** is the geodesic distance in metres from Fountain
   Square (39.1011, −84.5125), Cincinnati's central square at Fifth and Vine
   and the conventional centre of the CBD. Computed in Section 5 with
@@ -858,10 +861,7 @@ feed:
 
 In rough priority order, from `TODO.md` and the panel spec:
 
-- [ ] **Apply the pending migration to production** (`--setup`, then
-      `--full --reprocess`): `distance_to_cbd_m` and paired coordinate
-      nulling.
-- [ ] **Scheduled cloud refresh.** The steps are tracked under
+- [ ] **Scheduled cloud refresh.** Next up; the steps are tracked under
       [Deployment status](#status).
 - [ ] Load `ml_cell_attributes` (OSM road miles, ODOT AADT, ACS) so exposure
       becomes a real rate denominator
