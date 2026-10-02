@@ -306,18 +306,41 @@ the first cloud delta, which found 0 new and 0 changed with `MAX(crash_date)`
 unmoved. Guard 3 watches whether the city is publishing; guard 4 watches
 whether any of it is new.
 
-Install it **owned by you**, not by the runtime service account:
+Install it **owned by you, from the BigQuery console**. Not from the script,
+and not owned by the runtime service account. Both of those were tried here
+on 2026-10-02 and neither works:
 
-```powershell
-pip install google-cloud-bigquery-datatransfer
-python deploy/create_watchdog.py --as-me
-```
+- **Owned by the service account** — the config installs fine and the query
+  runs fine, but the failure notification goes to the config's owner, a
+  service account has no mailbox, and `owner_info` is empty. The watchdog
+  fails on schedule, correctly, and tells nobody. A forced failure produced
+  no mail at all.
+- **Owned by you, via this script** — refused by the API:
+  `400 Failed to find a valid credential. The field 'version_info' or
+  'service_account_name' must be specified.` Creating a user-owned scheduled
+  query needs an OAuth authorization code that application-default
+  credentials do not carry. The console runs that consent flow; the API does
+  not. The script now refuses this up front rather than failing partway.
 
-Running it as the service account looks tidier and was the first thing tried
-here. It does not work. The failure notification goes to the transfer
-config's owner, a service account has no mailbox, and `owner_info` comes back
-empty — so the query fails on schedule, correctly, and tells nobody.
-Confirmed on 2026-10-02: a forced failure produced no mail at all.
+In the BigQuery console:
+
+1. Open the SQL editor and paste the whole of
+   [deploy/watchdog.sql](deploy/watchdog.sql).
+2. **Run it once** first. It should return a single row, `ok`.
+3. **Schedule** → *Create new scheduled query*.
+4. Name: `crash-etl watchdog`.
+5. Repeats: *Custom*, with `every day 14:00`. The console reads this as UTC,
+   which is 09:00 EST / 10:00 EDT — after the 06:00 load either way, which
+   guard 2's 24-hour threshold depends on.
+6. Leave the destination table **empty**. This is a script, not a query with
+   a result to store.
+7. Leave the service-account field on your own credentials. Choosing the
+   runtime account here is exactly the thing that silences the mail.
+8. Tick **Send email notifications**.
+9. Save, and accept the OAuth consent prompt.
+
+Afterwards the script manages it normally — `--update` pushes a changed
+`watchdog.sql` without touching ownership.
 
 The objection to owning it yourself is that the schedule then depends on your
 credentials. That is real but much smaller than it sounds, because it fails

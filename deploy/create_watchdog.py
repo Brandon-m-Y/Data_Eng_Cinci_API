@@ -8,15 +8,14 @@ and so a changed watchdog.sql can be pushed without re-clicking it.
     python deploy/create_watchdog.py --service-account crash-etl-runtime@PROJECT.iam.gserviceaccount.com
     python deploy/create_watchdog.py --update --service-account ...   # after editing watchdog.sql
 
-Install it with --as-me, owned by you. Running it as the runtime service
-account was tried first and does not work: the failure notification follows
-the transfer config's owner, a service account has no mailbox, owner_info
-comes back empty, and the mail goes nowhere. Confirmed 2026-10-02 by forcing
-a failure and receiving nothing.
-
-Owning it yourself ties the schedule to your credentials, which fails in the
-safe direction -- if they stop working the run fails, and a failed run mails
-you. Running with no flags reports who the mail currently reaches.
+Create the watchdog in the BigQuery console, not here -- see DEPLOY.md
+step 8. This script cannot create one owned by a person: the API wants an
+OAuth authorization code ('version_info') that application-default
+credentials do not carry, and a service-account-owned config can never send
+mail because a service account has no mailbox. Both were confirmed on
+2026-10-02. What this script is good for is everything after that: --update
+to push a changed watchdog.sql, --test-alert to prove the mail arrives, and
+no flags at all to report who the mail currently reaches.
 """
 
 import argparse
@@ -95,6 +94,22 @@ def main():
 
     existing = next((t for t in client.list_transfer_configs(parent=parent)
                      if t.display_name == DISPLAY_NAME), None)
+
+    # Refuse before deleting anything. Creating a config owned by a person
+    # requires an OAuth authorization code, which the API calls version_info
+    # and application-default credentials do not supply:
+    #   400 Failed to find a valid credential. The field 'version_info' or
+    #       'service_account_name' must be specified.
+    # The BigQuery console runs that consent flow, so it is the only way to
+    # create a user-owned watchdog. This check exists because finding out by
+    # trying deleted the live watchdog first (2026-10-02).
+    if args.as_me and (existing is None or args.recreate):
+        sys.exit(
+            'Cannot create a watchdog owned by you through this API: it needs an\n'
+            "OAuth authorization code ('version_info') that application-default\n"
+            'credentials do not provide. Nothing has been changed.\n\n'
+            'Create it in the BigQuery console instead (DEPLOY.md step 8), which\n'
+            'runs the consent flow for you. This script can --update it afterwards.')
 
     # --recreate has to delete before creating, because two configs cannot
     # share a display name. If the create then fails you are left with no
