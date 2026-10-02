@@ -367,10 +367,12 @@ On Windows, Docker Desktop needs WSL 2. If its engine won't start, run
       [DEPLOY.md](DEPLOY.md), [deploy/watchdog.sql](deploy/watchdog.sql),
       `deploy/create_watchdog.py`, `.github/workflows/deploy.yml`
 - [x] Watchdog SQL validated against production: the healthy path returns
-      `ok`, and all three guards were made to fire against simulated data
-- [ ] Enable APIs, Artifact Registry repo, both service accounts, Secret
+      `ok`, and all four guards were made to fire against simulated data
+- [x] Enabled APIs, Artifact Registry repo, both service accounts, Secret
       Manager secret ([DEPLOY.md](DEPLOY.md) steps 1–4)
-- [ ] Build, push and create the two Cloud Run Jobs (steps 5–7)
+- [x] Built, pushed and created both Cloud Run Jobs, pinned by image digest
+      (steps 5–6). The `--delta` smoke test ran against production and
+      released its lease (step 7)
 - [x] Watchdog scheduled query installed and its email proven: created in
       the BigQuery console so a person owns it, daily at 14:00 UTC, and a
       forced failure delivered mail (2026-10-02)
@@ -899,16 +901,21 @@ feed:
 
 In rough priority order, from `TODO.md` and the panel spec:
 
-- [ ] **Scheduled cloud refresh.** Next up; the steps are tracked under
-      [Deployment status](#status).
+- [x] **Scheduled cloud refresh.** Running since 2026-10-02: `--delta`
+      Mon–Sat and `--full` Sun, both 06:00 America/New_York, with a daily
+      watchdog. What is left is hardening — steps 10 and 11 and Workload
+      Identity Federation, tracked under [Deployment status](#status).
 - [ ] Load `ml_cell_attributes` (OSM road miles, ODOT AADT, ACS) so exposure
       becomes a real rate denominator
 - [ ] Load `ml_weather_daily` (NOAA, one station)
 - [ ] Before training for forecasting, in the training code rather than the
       panel:
   - lag the features to the forecast issue time — the panel is event-time by
-    design, and the ~9-day publish cadence plus the 3.7-day p99 reporting lag
-    puts the freshest trustworthy crash day around t−13;
+    design, and the binding constraint is the **publication** lag, measured at
+    39 days on 2026-10-02 (the newest crash day stops dead at 2026-08-24 and a
+    republish does not move it). Lag to roughly **t−40**, not the t−13 this
+    plan carried, which wrongly added the publish cadence to the 3.7-day p99
+    *reporting* lag — a quantity internal to one publication;
   - use forecast weather for the target week, not the observed weather the
     panel carries.
 - [ ] `train.py`:
