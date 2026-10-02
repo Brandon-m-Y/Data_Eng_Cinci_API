@@ -1,5 +1,12 @@
 # Deployment runbook
 
+**Status: every step here was run and verified on 2026-10-02.** The system
+described below is live. What follows is kept as the record of how it was
+built and as the procedure for rebuilding it — in a new project, after a
+disaster, or when someone wants to know why a piece is shaped the way it is.
+Each step records what actually happened, including the parts that failed
+first. [OPERATIONS.md](OPERATIONS.md) describes the running system.
+
 Exact steps to put the pipeline on Cloud Run with a weekly full load. Run
 these yourself, in order, in PowerShell from the repo root. Every step ends
 with a **Verify** you should see pass before moving on.

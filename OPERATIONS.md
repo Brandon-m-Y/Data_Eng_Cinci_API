@@ -3,7 +3,9 @@
 What happens in the cloud, what triggers it, and what to check when something
 looks wrong. [DEPLOY.md](DEPLOY.md) is how it was built; this is how it
 behaves now that it exists. [README.md](README.md) covers the data model and
-the ETL logic itself.
+the ETL logic, and [README.md § The data](README.md#the-data) covers where
+the feed comes from and what its quirks are — several alerts here only make
+sense once you know the feed republishes without adding data.
 
 Deployed and verified end to end on 2026-10-02.
 

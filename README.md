@@ -1,5 +1,44 @@
 # Cincinnati Traffic Crash Data Platform
 
+## Project summary
+
+Cincinnati publishes every police traffic-crash report as open data — in a
+shape that resists analysis. One row per person rather than per crash, every
+value a raw string, two incompatible coding eras sitting side by side, and no
+reliable way to ask what changed since last time.
+
+**This project turns that feed into a warehouse you can query and a panel you
+can model, and then runs itself.** A delta load Monday to Saturday, a full
+rebuild on Sunday, unattended on Google Cloud.
+
+Most of the engineering here is a response to three specific properties of
+the source, each discovered the expensive way:
+
+- **No usable change stamp.** Every row carries the same `:updated_at`, so
+  there is no cheap "what is new" question to ask. The pipeline uses a date
+  window and content hashing instead.
+- **The primary key is regenerated on every republish.** A `MERGE` keyed on
+  Socrata's `:id` looked correct and duplicated 6,791 rows. The fact is now
+  keyed on `instanceid` and replaced one crash at a time.
+- **Coordinates are re-randomized on every republish**, deliberately, for
+  privacy. Including them in the change hash made every republish rewrite the
+  entire dataset. They are excluded from it.
+
+**What exists today:** 221,289 crashes and 433,160 person-rows in a Kimball
+star schema, plus a complete 53-neighborhood × 3,882-day panel with
+leakage-safe lag features and a forecast label. It runs as a container on
+Cloud Run under a single-writer lease, writes an audit row for every run, and
+has two independent alerts — both of which have been deliberately made to fire
+and deliver. No long-lived credential exists anywhere in the system.
+
+**What is not done:** the external features (weather, traffic volume,
+population) are schema-ready but empty, and the crash-likelihood model itself
+is not trained. See [Roadmap](#roadmap).
+
+---
+
+## What it is
+
 An end-to-end data engineering project built on the Cincinnati Police
 **Traffic Crash Reports** open-data feed (Socrata dataset `rvmt-pkmq`). It has
 three layers:
@@ -18,15 +57,19 @@ against the source's own row count before it's used, the fact load is one
 transaction, only one run can write at a time, and every run is recorded in
 an audit log with its outcome.
 
-**Direction:** the pipeline is being moved from manual local runs to a
-scheduled batch job on Google Cloud. It is containerized with Docker, will
-run as a Cloud Run Job triggered by Cloud Scheduler, and will deploy through
-GitHub Actions. See [Deployment](#deployment).
+**It is deployed.** Since 2026-10-02 it runs on Google Cloud without anyone
+present: Cloud Scheduler triggers a Cloud Run Job, GitHub Actions builds and
+ships the image through Workload Identity Federation, and a daily BigQuery
+watchdog plus a Cloud Monitoring policy mail a person when something is
+wrong. [OPERATIONS.md](OPERATIONS.md) is how it behaves;
+[DEPLOY.md](DEPLOY.md) is how it was built.
 
 ---
 
 ## Contents
 
+- [Project summary](#project-summary)
+- [The data](#the-data)
 - [Current state](#current-state)
 - [Architecture](#architecture)
 - [Setup](#setup)
@@ -46,13 +89,129 @@ GitHub Actions. See [Deployment](#deployment).
 
 ---
 
+## The data
+
+### Where it comes from
+
+Everything in the warehouse derives from **one** public source. There is no
+private data, no scraped data and no manual entry anywhere in the pipeline.
+
+| | |
+|---|---|
+| Dataset | **Traffic Crash Reports (CPD)** |
+| Publisher | Cincinnati Police Department, via the City of Cincinnati open data portal |
+| Portal | [data.cincinnati-oh.gov](https://data.cincinnati-oh.gov/) |
+| Identifier | Socrata dataset `rvmt-pkmq` |
+| Access | Socrata **v3** API, `POST` query body, 50,000-row pages ordered by `:id` |
+| Credential | A free Socrata app token — rate limiting only. The data itself is public and needs no authentication |
+| Full extract | ~435 MB, 433,160 person-rows, 221,289 crashes |
+| Crash dates | 1900-02-06 to 2026-08-24. Only **2** rows predate 2010, and both are data-entry errors; the usable history starts in 2010 |
+| Columns | 31, all delivered as strings |
+
+The feed is a police **report** extract, not a sensor or telematics feed.
+Every row originates in an officer-completed crash report, which is why it
+carries severity and injury coding, and why it arrives well over a month
+after the event.
+
+### What one row is
+
+**A row is a person, not a crash.** Each person or unit involved — drivers,
+passengers, pedestrians, cyclists — gets its own row, repeating the crash's
+details. A two-car collision with three occupants is three rows sharing one
+`instanceid`.
+
+This is the single most common way to get an answer wrong from this feed.
+Counting rows counts people; counting crashes needs
+`COUNT(DISTINCT instanceid)`. The warehouse keeps the person grain in
+`fact_crash_person` rather than flattening it, because collapsing to one row
+per crash throws away every passenger and pedestrian.
+
+The 31 columns fall into five groups:
+
+| Group | Columns |
+|---|---|
+| Identity and time | `instanceid`, `localreportno`, `crashdate`, `datecrashreported`, plus Socrata's own `:id`, `:version`, `:created_at`, `:updated_at` |
+| Location | `address`, `latitude`, `longitude`, `zip`, three competing neighborhood schemes, `roadclass`, `roadclassdesc`, `crashlocation` |
+| Conditions | `lightconditionsprimary`, `roadconditionsprimary`, `roadcontour`, `roadsurface`, `weather` |
+| Crash classification | `mannerofcrash`, `crashseverity`, `crashseverityid` |
+| Person | `typeofperson`, `unittype`, `gender`, `age`, `injuries` |
+
+**There are no direct identifiers.** No names, no license or VIN numbers, no
+report narrative, and no exact addresses — the publisher masks those before
+release (see below). The person attributes present are demographic and
+injury coding only.
+
+### How it updates, and how far behind it runs
+
+The feed is **republished as a whole file**. There is no incremental
+endpoint, no changelog, and no per-row modification time: every row shares
+one `:updated_at`, which is the publish stamp rather than a change stamp.
+This is why the pipeline cannot simply ask for new rows, and why
+[Load strategy](#load-strategy-delta-vs-full) exists.
+
+Two different lags matter, and conflating them produces a wrong answer:
+
+- **Reporting lag** — crash date to reported date, internal to one
+  publication. Small: p99 of 3.7 days.
+- **Publication lag** — crash date to the data appearing at all. **Measured
+  at 39 days on 2026-10-02**, and it behaves as a cliff rather than a
+  trickle: daily volume runs at full strength through 2026-08-23 and then
+  stops dead.
+
+The publication lag is the binding one. It is also not what a republish
+fixes — the 2026-10-02 republish changed the stamp and re-randomized
+coordinates without adding a single new crash day. Any forecasting work has
+to lag its features to roughly **t−40**, not to the reporting lag.
+
+### What the publisher deliberately alters
+
+Two privacy treatments are applied before release, and both have
+consequences for anything built on top:
+
+- **Addresses are masked to the block** — `2XX W MITCHELL AV`.
+- **Each row's latitude and longitude are independently randomized** around
+  the true location, and **redrawn on every publish**. The rows of a single
+  crash sit a median 113 m apart. Typical offset from the row's own
+  address-block centre is 106 m (p50) and 396 m (p90), but 3.7% of rows land
+  over 2 km away and the worst is 36 km.
+
+So exact coordinates are not reproducible between publishes and not
+trustworthy within one. Categorical location — neighborhood, road class,
+intersection flag — *is* perfectly stable, which is why `ml_crash_panel` is
+built on `cpd_neighborhood` and why coordinates are excluded from the change
+hash. [Source data gotchas](#source-data-gotchas) has the full list of
+quirks, including the two coding eras and the junk values.
+
+### External data: planned, not loaded
+
+Two tables exist with schemas and no rows. They are the intended second and
+third sources, and nothing depends on them yet:
+
+| Table | Intended source |
+|---|---|
+| `ml_weather_daily` | NOAA, Cincinnati/Northern Kentucky airport (CVG) station |
+| `ml_cell_attributes` | OpenStreetMap road miles and intersection counts, ODOT traffic volume (AADT), ACS population |
+
+Until they arrive, the panel's `exposure` denominator falls back to hours
+alone, and `exposure_source` records which form each row received.
+
+### Terms of use
+
+The dataset is published openly by the City of Cincinnati; reuse is governed
+by the portal's own terms, which is the authoritative source and is worth
+reading before redistributing anything derived from it. This project reads
+the public endpoint and keeps a derived copy in a private BigQuery dataset.
+
+---
+
 ## Current state
 
-As of 2026-10-01, BigQuery dataset `crashes` in `us-east1`:
+**The pipeline is deployed and running unattended.** As of 2026-10-02,
+BigQuery dataset `crashes` in `us-east1`:
 
 | Object | Type | Rows | Notes |
 |---|---|---:|---|
-| `stg_crash_person` | table | 433,160 | Raw feed, all STRING; replaced every load (this is the last load's window) |
+| `stg_crash_person` | table | 6,790 | Raw feed, all STRING; replaced every load, so it holds whatever the **last** load fetched — currently a 90-day delta window, not the full history |
 | `vw_stg_crash_person_clean` | view | | The one place cleaning happens |
 | `fact_crash_person` | table | 433,160 | One row per person/unit per crash; 221,289 crashes, 1900-02-06 to 2026-08-24 |
 | `dim_date` | table | 9,497 | 2010-01-01 to 2035-12-31, plus the unknown member |
@@ -62,25 +221,41 @@ As of 2026-10-01, BigQuery dataset `crashes` in `us-east1`:
 | `dim_crash_type` | table | 72 | |
 | `dim_person_profile` | table | 3,914 | Junk dimension |
 | `dim_crash_date`, `dim_reported_date` | views | | Role-playing views over `dim_date` |
-| `etl_load_log` | table | 1 row per load | ETL audit, with each load's status |
+| `etl_load_log` | table | 10 | One row per load, with its status, counts and timings |
 | `etl_lease` | table | 1 | Which run may write; created by `--setup` |
 | `ml_crash_panel` | table | 205,746 | 53 neighborhoods × 3,882 days |
 | `ml_weather_daily`, `ml_cell_attributes` | tables | 0 | Schema ready; external data not loaded yet |
 
 **Where things stand:**
-- **Pipeline:** complete, and run by hand from a local machine or the Docker
-  image.
+
+- **Pipeline:** complete. It no longer needs a person — Cloud Scheduler runs
+  `--delta` Monday to Saturday and `--full` on Sunday, both 06:00
+  America/New_York.
+- **Deployment: done, all eleven steps.** Cloud Run Jobs pinned by image
+  digest, the Socrata token in Secret Manager, keyless auth through an
+  attached service account, GitHub Actions deploying through Workload
+  Identity Federation, and two alerts that have each been forced to fire and
+  confirmed to deliver. There is no long-lived credential anywhere: the last
+  service-account key was destroyed 2026-10-02 and local runs use
+  application-default credentials.
+  [OPERATIONS.md](OPERATIONS.md) is the working description.
 - **Production matches the repository.** The last migration (`--setup`, then
   `--full --reprocess`) ran 2026-10-01: all 221,289 crashes rewritten in
   4m58s, `distance_to_cbd_m` populated for every row that has coordinates,
-  and the 176 single-coordinate rows resolved. A hash recomputation against
-  the current staging publish reports 0 new and 0 changed, so the next
-  `--delta` is a no-op.
-- **Deployment:** the container builds and runs locally. The GCP resources,
-  CI/CD and schedule are not set up yet.
+  and the 176 single-coordinate rows resolved. Every load since has reported
+  0 new, 0 changed and 0 removed — correctly, because the feed has published
+  no new crash day since 2026-08-24.
 - **ML:** the panel is built and validated, and carries its forecast label.
   External features (weather, AADT, population) and model training are not
-  started.
+  started. The measured 39-day publication lag makes this harder than first
+  planned: the model has to lean on weather and static attributes, because
+  the crash history available at forecast time ends 40 days back.
+
+**What has not happened yet.** Worth stating plainly, because a green
+checklist hides it: **the full write path has never run in the cloud.**
+Every load so far found zero changes, so inserts, deletions and the deletion
+cap have only ever executed locally. The `crash-etl-full` job has never run
+at all. The first Sunday full load is the real test.
 
 **Verified behavior.** The whole suite runs against a fresh clone of
 production (`tests/integration_bigquery.py`, 56 checks, last green
@@ -241,16 +416,16 @@ the `-- SECTION n:` marker lines, and substitutes `GCP_DATASET` for
 
 ## Deployment
 
-The goal is an unattended load on Google Cloud: `--delta` Monday–Saturday and
-`--full` on Sunday, both at 06:00 America/New_York. The container is built and
-verified against production and the scaffolding is written; the cloud
-resources themselves have not been created yet (see [Status](#status)).
+An unattended load on Google Cloud: `--delta` Monday–Saturday and `--full`
+on Sunday, both at 06:00 America/New_York. **This is live** — every step in
+[Status](#status) is done, and [OPERATIONS.md](OPERATIONS.md) describes how
+the deployed system actually behaves.
 
 **[DEPLOY.md](DEPLOY.md) is the step-by-step procedure** — every command, in
 order, each with something to verify before moving on. This section is the
 design behind it: what each piece is for and why it is shaped this way.
 
-### Target architecture
+### Architecture as deployed
 
 ```
  GitHub (push to main)
@@ -730,7 +905,11 @@ feed:
   - two rows with a 1900 crash date
 
   The cleaning view nulls or repairs all of these.
-- **The feed runs about 2 weeks behind,** and its newest day is partial.
+- **The feed runs about 39 days behind,** measured 2026-10-02, and the
+  cutoff is a cliff rather than a trickle — full-strength daily volume
+  through 2026-08-23, then nothing. An earlier estimate of two weeks came
+  from adding the publish cadence to the *reporting* lag, which are
+  different quantities. See [The data](#the-data).
 
 ---
 
@@ -772,9 +951,10 @@ feed:
 | `tests/integration_bigquery.py` | End-to-end test on a throwaway clone of the dataset: 56 checks, about 30 minutes, needs credentials. Run command in its docstring. |
 | `DEPLOY.md` | Step-by-step Cloud Run deployment: every command in order, each with a verification. The design behind it is in [Deployment](#deployment). |
 | `OPERATIONS.md` | How the deployed pipeline behaves: what triggers it (Cloud Scheduler, not GitHub), what happens inside a run, the resource inventory, what is verified vs assumed, and the gotchas found while deploying it. |
-| `deploy/watchdog.sql` | Hourly health check run as a BigQuery scheduled query. Raises on a stuck lease, a stalled pipeline or a stale feed; the failed run is what sends the mail. |
-| `deploy/create_watchdog.py` | Installs or updates that scheduled query, running it as the runtime service account. |
-| `.github/workflows/deploy.yml` | On push to `main`: offline suite, then build, push and point both jobs at the new digest. Needs Workload Identity Federation; not yet exercised. |
+| `deploy/watchdog.sql` | Daily health check (14:00 UTC) run as a BigQuery scheduled query. Four guards: a stuck lease, a stalled pipeline, a stale feed, and a feed that republishes without advancing. A tripped guard fails the run, and the failed run is what sends the mail. |
+| `deploy/create_watchdog.py` | Updates and reports on that scheduled query. It cannot *create* one owned by a person — that needs an OAuth consent flow only the BigQuery console runs — and a service-account-owned config can never send mail. |
+| `deploy/alert_job_failed.json` | The Cloud Monitoring policy for a failed Cloud Run execution, kept as a file so the filter and aggregation are reviewable rather than buried in a console form. |
+| `.github/workflows/deploy.yml` | On push to `main` touching anything that reaches the image: offline suite, then build, push and point both jobs at the new digest, authenticating through Workload Identity Federation. **Live** — a non-docs push now changes production. |
 | `crash-panel-spec.md` | Spec for the ML panel and the modeling plan (written as a pandas plan; the panel is built in BigQuery instead). |
 | `AUDIT.md` | Two-model audits of the project (2026-09-19 and 2026-10-01) and what each one changed. |
 | `TODO.md` | Open tasks. |
@@ -947,6 +1127,7 @@ In rough priority order, from `TODO.md` and the panel spec:
 
 ## Links
 
-- Pagination: [support.socrata.com/hc/en-us/articles/202949268-How-to-query-more-than-1000-rows-of-a-dataset](https://support.socrata.com/hc/en-us/articles/202949268-How-to-query-more-than-1000-rows-of-a-dataset)
-- Data: [data.cincinnati-oh.gov](https://data.cincinnati-oh.gov/)
+- The dataset: [data.cincinnati-oh.gov/d/rvmt-pkmq](https://data.cincinnati-oh.gov/d/rvmt-pkmq) — Traffic Crash Reports (CPD)
+- The portal: [data.cincinnati-oh.gov](https://data.cincinnati-oh.gov/)
 - Login / app token: [data.cincinnati-oh.gov/profile/edit/developer_settings](https://data.cincinnati-oh.gov/profile/edit/developer_settings)
+- Pagination: [support.socrata.com/hc/en-us/articles/202949268-How-to-query-more-than-1000-rows-of-a-dataset](https://support.socrata.com/hc/en-us/articles/202949268-How-to-query-more-than-1000-rows-of-a-dataset)
