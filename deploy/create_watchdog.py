@@ -86,18 +86,23 @@ def main():
         email_preferences=bigquery_datatransfer.EmailPreferences(enable_failure_email=True),
     )
 
+    # service_account_name is a field on the request message, not one of the
+    # method's convenience keyword arguments, so both calls build a request.
     if existing:
         config.name = existing.name
         result = client.update_transfer_config(
-            transfer_config=config,
-            update_mask=field_mask_pb2.FieldMask(
-                paths=['params', 'schedule', 'email_preferences']),
-            service_account_name=service_account or '')
+            request=bigquery_datatransfer.UpdateTransferConfigRequest(
+                transfer_config=config,
+                update_mask=field_mask_pb2.FieldMask(
+                    paths=['params', 'schedule', 'email_preferences']),
+                service_account_name=service_account or ''))
         print(f'Updated {result.name}')
     else:
         result = client.create_transfer_config(
-            parent=parent, transfer_config=config,
-            service_account_name=service_account or '')
+            request=bigquery_datatransfer.CreateTransferConfigRequest(
+                parent=parent,
+                transfer_config=config,
+                service_account_name=service_account or ''))
         print(f'Created {result.name}')
 
     runner = service_account or 'your own credentials'
