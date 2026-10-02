@@ -90,7 +90,8 @@ Written and validated, not yet installed:
   A) before it can run; until then it fails at the auth step and nothing else
   is affected.
 
-Remaining, in order:
+Every step is done as of 2026-10-02. Kept as a record of what each one
+proved, because "installed" and "working" came apart more than once:
 
 - [x] APIs, Artifact Registry, Secret Manager, service accounts (steps 1–4)
 - [x] Built, pushed and created both Cloud Run Jobs; the delta smoke test
@@ -109,24 +110,34 @@ Remaining, in order:
       the provider only accepts this one repository, and the three repo
       variables are set, so the deploy job is live.
 
-Left over from those, both the same kind of gap: installed but never
-exercised.
+Both of the last two were installed before they were proven, which is the
+same shape of gap the watchdog email had. Both are now closed:
 
-- [ ] Make the monitoring policy fire once, the way the watchdog's email was
-      proved. `gcloud run jobs execute crash-etl-delta --args=--force-a-failure
-      --region=us-east1 --wait` fails in argparse before any client is built.
-- [x] The deploy job has now run, twice, and both jobs sit on the digest it
-      built (`sha256:fb7fbf44...`, tag `7ade673`). Nothing has *executed*
-      that image yet — the Saturday 06:00 delta is the first to.
+- [x] The monitoring policy has fired and delivered (2026-10-02). The forced
+      failure cost nothing: no lease acquired, no `etl_load_log` row, and the
+      metric recorded `1`, confirming it counts executions rather than the
+      two task attempts.
+- [x] The deploy job has run twice and both jobs sit on the digest it built
+      (`sha256:fb7fbf44...`, tag `7ade673`). The forced failure above ran on
+      that image, so it pulls and starts; what it has not done is a real
+      load. Saturday's 06:00 delta is the first.
 
-Open questions DEPLOY.md does not answer:
+Watch next:
 
-- Whether to prove the watchdog's **email actually arrives**. The guards are
-  tested; delivery to your inbox is not. DEPLOY.md step 8 has a safe way to
-  force one, and it is worth doing once — an alert nobody has ever received is
-  an assumption, not a safeguard.
+- **Saturday 06:00 ET** — first scheduled delta on the CI-built image.
+- **Sunday 06:00 ET** — first `--full` ever, and the first exercise of
+  inserts, deletions and the deletion cap in the cloud.
+
+Still open:
+
 - Whether `bigquery.dataEditor` should stay project-level. Fine while this
   project holds one dataset; Appendix B tightens it to `crashes` alone.
+- Whether to disable `cinci-crash-etl`. It is keyless and unused; disabling
+  is the reversible way to find out whether anything still depends on it.
+- Whether the deploy job should need a human. One environment, one branch,
+  and only the offline suite between a push and production. A GitHub
+  Environment with required reviewers would add a click; worth deciding
+  after the first full load, not before.
 
 ## Deferred
 

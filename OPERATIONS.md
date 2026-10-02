@@ -225,9 +225,12 @@ That metric counts **executions**, not task attempts. Both jobs run with
 `--max-retries=1`, so a run that fails once and succeeds on the retry does
 not alert — only a genuinely failed execution does.
 
-**It has never fired.** The same gap the watchdog email had before it was
-tested. [DEPLOY.md](DEPLOY.md) step 10 has a safe way to force one: an
-unknown flag makes `argparse` exit before any BigQuery client is built.
+**Proven end to end on 2026-10-02.** A forced failure
+(`--args=--force-a-failure`) exited in `argparse` at 21:01:10 UTC without
+building a client, the metric carried one point — value `1`, not `2`, so it
+really does count executions and not the two task attempts — and the mail
+arrived. `etl_lease` was never acquired and `etl_load_log` gained no row, so
+the test costs nothing. [DEPLOY.md](DEPLOY.md) step 10 has the command.
 
 ---
 
@@ -326,8 +329,14 @@ Being specific about this matters more than a green checklist.
   20:10:22, `succeeded` at 184 s, lease released.
 - The watchdog's healthy path returns `ok`, and **all four guards fire** with
   correct messages when forced against simulated data.
-- The failure email actually reaches a human inbox.
+- The watchdog's failure email actually reaches a human inbox.
+- **The Cloud Monitoring alert fires and delivers.** Forced failure at
+  21:01:10 UTC, metric point within ~90 s, mail received.
 - 51 offline tests pass on clean Ubuntu with Python 3.13 in CI.
+- **The GitHub Actions deploy path**, twice: token minted through federation
+  with no stored key, image built and pushed, both jobs repointed by digest.
+- **The CD-built image starts in Cloud Run** — the forced failure ran on
+  `sha256:fb7fbf44…`, so it pulls and runs Python correctly.
 
 **Not yet exercised:**
 
@@ -336,11 +345,10 @@ Being specific about this matters more than a green checklist.
   Inserts, deletions and the deletion cap have not run in the cloud. The first
   Sunday full load is the real test.
 - The `crash-etl-full` job has never run at all — only `crash-etl-delta`.
-- **The Cloud Monitoring alert.** Installed, enabled, never fired.
-- **The new image under a real load.** The deploy job has run and both jobs
-  now point at a digest GitHub built, but nothing has executed it. No file
-  that goes into the image changed, so it should behave identically; the
-  Saturday 06:00 delta is what will show that.
+- **The CD-built image doing a real load.** It starts correctly, but the
+  only thing it has run is a deliberate crash in `argparse`. No file the
+  Dockerfile copies changed between it and the smoke-tested digest, so it
+  should behave identically — Saturday's 06:00 delta is what will show that.
 - Recovery from a genuinely stuck lease, which has only been reasoned about.
 
 ---
@@ -414,13 +422,13 @@ the full cap is 2,213. Neither is close to binding.
 
 ## Still to do
 
-Steps 10 and 11 and Appendix A were all completed on 2026-10-02: the local
-key is destroyed, the failure alert is installed, and federation is
-configured. What is left is proving the two new things work and watching the
-first full load.
+Every step of [DEPLOY.md](DEPLOY.md) is done as of 2026-10-02, and both
+things it added have been proven rather than assumed: the alert has fired
+and delivered, and the deploy job has built and repointed twice. The local
+key is destroyed.
 
-- **Make the monitoring alert fire once**, the way the watchdog's email was
-  proved (step 10).
+- **Watch Saturday's 06:00 delta** — the first real load on an image built
+  by CI rather than by hand.
 - **Watch Sunday's full load** — the first exercise of the full write path in
   the cloud, and the thing that still matters most.
 - Optional: disable `cinci-crash-etl`, now that it is keyless and unused.
