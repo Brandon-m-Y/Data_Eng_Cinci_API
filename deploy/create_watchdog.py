@@ -133,8 +133,9 @@ def main():
               f'  query         : {"matches watchdog.sql" if matches else "DIFFERS from watchdog.sql"}')
         if not owner and existing.email_preferences.enable_failure_email:
             print('  WARNING: failure email is on but there is no owner address, so no\n'
-                  '  mail can be sent. Recreate it owned by you:\n'
-                  '    python deploy/create_watchdog.py --recreate --as-me')
+                  '  mail can be sent. The checks run; nobody hears about a failure.\n'
+                  '  Fixing this means recreating it owned by a person, which only the\n'
+                  '  BigQuery console can do -- see DEPLOY.md step 8.')
         if not matches:
             print('  WARNING: the deployed query is not the one in this repo.\n'
                   '    python deploy/create_watchdog.py --update --service-account <SA>')
