@@ -6,7 +6,8 @@ with a **Verify** you should see pass before moving on.
 
 This is the *procedure*. The *design* — why a Job and not a service, why the
 lock never expires, how the sizing was measured — is in
-[README.md § Deployment](README.md#deployment). Recovery from a stuck lock is
+[README.md § Deployment](README.md#deployment). Once it is built,
+[OPERATIONS.md](OPERATIONS.md) describes how it behaves. Recovery from a stuck lock is
 in [README.md § Operational notes](README.md#operational-notes).
 
 Commands are written as single lines on purpose. They are wide, but they

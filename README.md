@@ -32,6 +32,7 @@ GitHub Actions. See [Deployment](#deployment).
 - [Setup](#setup)
 - [Running the pipeline](#running-the-pipeline)
 - [Deployment](#deployment)
+- [How it runs in the cloud](OPERATIONS.md)
 - [Load strategy: delta vs full](#load-strategy-delta-vs-full)
 - [Data model (star schema)](#data-model-star-schema)
 - [ML panel](#ml-panel)
@@ -754,6 +755,7 @@ feed:
 | `tests/test_lock_safety.py` | Offline tests for the writer lock: acquisition, outcome tracking, and the takeover attempts that must fail. Same runner. |
 | `tests/integration_bigquery.py` | End-to-end test on a throwaway clone of the dataset: 56 checks, about 30 minutes, needs credentials. Run command in its docstring. |
 | `DEPLOY.md` | Step-by-step Cloud Run deployment: every command in order, each with a verification. The design behind it is in [Deployment](#deployment). |
+| `OPERATIONS.md` | How the deployed pipeline behaves: what triggers it (Cloud Scheduler, not GitHub), what happens inside a run, the resource inventory, what is verified vs assumed, and the gotchas found while deploying it. |
 | `deploy/watchdog.sql` | Hourly health check run as a BigQuery scheduled query. Raises on a stuck lease, a stalled pipeline or a stale feed; the failed run is what sends the mail. |
 | `deploy/create_watchdog.py` | Installs or updates that scheduled query, running it as the runtime service account. |
 | `.github/workflows/deploy.yml` | On push to `main`: offline suite, then build, push and point both jobs at the new digest. Needs Workload Identity Federation; not yet exercised. |
