@@ -370,8 +370,9 @@ On Windows, Docker Desktop needs WSL 2. If its engine won't start, run
 - [ ] Enable APIs, Artifact Registry repo, both service accounts, Secret
       Manager secret ([DEPLOY.md](DEPLOY.md) steps 1–4)
 - [ ] Build, push and create the two Cloud Run Jobs (steps 5–7)
-- [ ] Install the watchdog scheduled query — **required before scheduling**
-      (step 8)
+- [x] Watchdog scheduled query installed and its email proven: created in
+      the BigQuery console so a person owns it, daily at 14:00 UTC, and a
+      forced failure delivered mail (2026-10-02)
 - [ ] Cloud Scheduler triggers: `--delta` Mon–Sat, `--full` Sun (step 9)
 - [ ] Cloud Monitoring policy for failed executions (step 10)
 - [ ] Retire the local service-account key for ADC (step 11)

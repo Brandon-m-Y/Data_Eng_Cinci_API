@@ -81,7 +81,10 @@ Written and validated, not yet installed:
   the load. Validated against production on 2026-10-02: the healthy path
   returns `ok`, and all four guards were made to fire against simulated data,
   so the messages are known to be correct.
-- `deploy/create_watchdog.py` — installs it as a scheduled query.
+- `deploy/create_watchdog.py` — manages it. It cannot *create* a user-owned
+  config: the API wants an OAuth authorization code that application-default
+  credentials do not carry, so creation happens in the BigQuery console. It
+  does handle `--update`, `--test-alert` and reporting.
 - `.github/workflows/deploy.yml` — build and deploy on push to `main`. Gated
   on the offline suite. Needs Workload Identity Federation (DEPLOY.md Appendix
   A) before it can run; until then it fails at the auth step and nothing else
@@ -89,9 +92,12 @@ Written and validated, not yet installed:
 
 Remaining, in order:
 
-- [ ] APIs, Artifact Registry, Secret Manager, service accounts (steps 1–4)
-- [ ] Build, push, create both Cloud Run Jobs, smoke-test the delta (steps 5–7)
-- [ ] **Install the watchdog — required before anything is scheduled** (step 8)
+- [x] APIs, Artifact Registry, Secret Manager, service accounts (steps 1–4)
+- [x] Built, pushed and created both Cloud Run Jobs; the delta smoke test
+      succeeded against production and released the lease (steps 5–7)
+- [x] **Watchdog installed and its email proven** (step 8). Created in the
+      BigQuery console, owned by a person, daily at 14:00 UTC. A forced
+      failure delivered mail on 2026-10-02.
 - [ ] Cloud Scheduler triggers (step 9)
 - [ ] Cloud Monitoring policy for failed executions (step 10)
 - [ ] Retire the local service-account key for ADC (step 11)

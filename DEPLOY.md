@@ -339,8 +339,24 @@ In the BigQuery console:
 8. Tick **Send email notifications**.
 9. Save, and accept the OAuth consent prompt.
 
-Afterwards the script manages it normally — `--update` pushes a changed
-`watchdog.sql` without touching ownership.
+Afterwards the script manages it normally. `--update` works fine on a
+user-owned config and does **not** need the authorization code that creating
+one does, so pushing a changed `watchdog.sql` is still a one-liner:
+
+```powershell
+python deploy/create_watchdog.py --update --as-me
+```
+
+Confirmed working end to end on 2026-10-02: created in the console, owned by
+a real address, and a forced failure delivered mail.
+
+Two things that will look like problems and are not:
+
+- The console saves the name as `crash-etl_watchdog`, with an underscore.
+  The script matches loosely, so it still finds it.
+- Pasting into the console drops a space after `--` on comment lines, so the
+  deployed query differs from the repo by whitespace alone. The report says
+  so explicitly; `--update` tidies it.
 
 The objection to owning it yourself is that the schedule then depends on your
 credentials. That is real but much smaller than it sounds, because it fails
@@ -380,14 +396,14 @@ inbox, so this is worth confirming rather than assuming.
 Install an always-failing watchdog and trigger it immediately:
 
 ```powershell
-python deploy/create_watchdog.py --update --test-alert --run-now --service-account $RUNTIME_SA
+python deploy/create_watchdog.py --update --test-alert --run-now --as-me
 ```
 
 Within a minute or two you should get mail about a failed scheduled query,
 with a body saying it is a delivery test. Then **restore the real watchdog**:
 
 ```powershell
-python deploy/create_watchdog.py --update --service-account $RUNTIME_SA
+python deploy/create_watchdog.py --update --as-me
 ```
 
 **Verify the restore**, because this is the one state you do not want to walk
