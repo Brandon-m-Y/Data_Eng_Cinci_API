@@ -96,7 +96,13 @@ def main():
     existing = next((t for t in client.list_transfer_configs(parent=parent)
                      if t.display_name == DISPLAY_NAME), None)
 
+    # --recreate has to delete before creating, because two configs cannot
+    # share a display name. If the create then fails you are left with no
+    # watchdog at all, which happened on 2026-10-02. Keep the old definition
+    # and put it back rather than leaving the project unmonitored.
+    replaced = None
     if existing and args.recreate:
+        replaced = existing
         client.delete_transfer_config(name=existing.name)
         print(f'Deleted {existing.name}')
         existing = None
@@ -146,11 +152,37 @@ def main():
                 service_account_name=service_account or ''))
         print(f'Updated {result.name}')
     else:
-        result = client.create_transfer_config(
-            request=bigquery_datatransfer.CreateTransferConfigRequest(
-                parent=parent,
-                transfer_config=config,
-                service_account_name=service_account or ''))
+        try:
+            result = client.create_transfer_config(
+                request=bigquery_datatransfer.CreateTransferConfigRequest(
+                    parent=parent,
+                    transfer_config=config,
+                    service_account_name=service_account or ''))
+        except Exception as failure:
+            if replaced is None:
+                raise
+            # Put back exactly what was deleted. Restore with the service
+            # account if one was named: if creating as a person just failed,
+            # restoring as that same person will fail the same way.
+            try:
+                client.create_transfer_config(
+                    request=bigquery_datatransfer.CreateTransferConfigRequest(
+                        parent=parent,
+                        transfer_config=bigquery_datatransfer.TransferConfig(
+                            display_name=replaced.display_name,
+                            data_source_id=replaced.data_source_id,
+                            params=dict(replaced.params),
+                            schedule=replaced.schedule,
+                            email_preferences=replaced.email_preferences),
+                        service_account_name=args.service_account or ''))
+                note = 'The previous watchdog was put back unchanged.'
+            except Exception as rollback_failure:
+                note = ('COULD NOT PUT THE PREVIOUS WATCHDOG BACK -- there is no\n'
+                        'watchdog installed right now, and nothing is watching the\n'
+                        'writer lease. Reinstall one before scheduling anything:\n'
+                        '  python deploy/create_watchdog.py --service-account <runtime SA>\n'
+                        f'  (rollback error: {rollback_failure})')
+            sys.exit(f'Create failed. {note}\n\n{type(failure).__name__}: {failure}')
         print(f'Created {result.name}')
 
     runner = service_account or 'your own credentials'
