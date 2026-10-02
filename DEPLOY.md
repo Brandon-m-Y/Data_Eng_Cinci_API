@@ -286,7 +286,7 @@ consequence is that a stuck lock blocks every later load **forever** and
 nothing in the system will mention it. Unattended scheduling without this
 alert turns a silent stall into weeks of stale data.
 
-[deploy/watchdog.sql](deploy/watchdog.sql) checks three things hourly and
+[deploy/watchdog.sql](deploy/watchdog.sql) checks four things hourly and
 raises an error if any trips. A failed scheduled query sends mail, so the
 failure *is* the alert — there is no extra state to keep.
 
@@ -294,7 +294,14 @@ failure *is* the alert — there is no extra state to keep.
 |---|---|---|
 | Stuck lock | `etl_lease` held over 2 hours | An owner that died with an unresolved job |
 | No recent load | No `succeeded` row in 36 hours | Crashed job, bad deploy, revoked permission |
-| Stale feed | `socrata_updated_at` unchanged 21 days | The city stopped publishing; loads still "succeed" |
+| Stale feed | `socrata_updated_at` unchanged 21 days | The city stopped publishing |
+| Data not advancing | Newest `crash_date` over 60 days old | The feed republishes but adds no crash days |
+
+The last two are not redundant. A publish can change the stamp while adding
+nothing — observed on 2026-10-02, when a fresh publish arrived an hour before
+the first cloud delta, which found 0 new and 0 changed with `MAX(crash_date)`
+unmoved. Guard 3 watches whether the city is publishing; guard 4 watches
+whether any of it is new.
 
 Install it, running as the runtime account so the check does not stop working
 when your own credentials expire:

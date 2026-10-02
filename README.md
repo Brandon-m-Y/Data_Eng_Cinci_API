@@ -310,10 +310,16 @@ Planned job settings:
   - No `etl_load_log` row with `status = 'succeeded'` in 36 hours. A delta
     runs six days a week and a full load on the seventh, so a healthy pipeline
     records a success every day; 36 hours allows one miss plus its retry.
-  - `socrata_updated_at` unchanged for 21 days, which means the feed itself
-    went stale. Deltas keep succeeding against an unchanged publication, so
+  - `socrata_updated_at` unchanged for 21 days, which means the city stopped
+    publishing. Deltas keep succeeding against an unchanged publication, so
     the other guards stay quiet while the data ages. The publishes seen so far
-    were 9 and 12 days apart, making 21 days two missed publishes.
+    were 9, 12 and 1 days apart, making 21 days a safe two missed publishes.
+  - Newest `crash_date` more than 60 days old, which means the feed is
+    republishing without adding crash days. Not redundant with the guard
+    above: on 2026-10-02 a fresh publish arrived, changed the stamp,
+    re-randomized the coordinates and added nothing — `MAX(crash_date)` stayed
+    at 2026-08-24, a 39-day publication lag. Measuring the stamp is not
+    measuring the data.
   - Job execution failures, as a Cloud Monitoring policy. Redundant with the
     36-hour guard, but minutes instead of hours.
 

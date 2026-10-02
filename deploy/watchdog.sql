@@ -69,6 +69,27 @@ SET problems = ARRAY(
     HAVING MAX(SAFE.PARSE_TIMESTAMP('%Y-%m-%dT%H:%M:%E*SZ', socrata_updated_at))
              < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 21 DAY)
 
+    UNION ALL
+
+    -- 4. The feed republishes but brings no new crash days. Guard 3 cannot
+    -- see this: socrata_updated_at changes on every publish, including one
+    -- that only re-randomizes coordinates. Observed 2026-10-02 -- a fresh
+    -- publish an hour before the first cloud delta, which found 0 new and 0
+    -- changed, with MAX(crash_date) unmoved at 2026-08-24. Measuring the
+    -- stamp is not measuring the data, so measure the data.
+    --
+    -- The normal publication lag is large: 39 days at the time of writing.
+    -- 60 allows three more weeks of slippage before this counts as abnormal.
+    -- Raise the threshold rather than silencing this if the lag grows for a
+    -- known reason.
+    SELECT FORMAT(
+      'DATA NOT ADVANCING: newest crash_date is %t, %d days back. Loads and '
+      || 'publishes may both be fine while no new crash days arrive.',
+      MAX(crash_date),
+      DATE_DIFF(CURRENT_DATE(), MAX(crash_date), DAY))
+    FROM crashes.fact_crash_person
+    HAVING DATE_DIFF(CURRENT_DATE(), MAX(crash_date), DAY) > 60
+
   ) WHERE msg IS NOT NULL
 );
 

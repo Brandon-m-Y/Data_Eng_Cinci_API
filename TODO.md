@@ -21,11 +21,16 @@ there.
 
   A full load has 88× headroom over the observed 25. A delta is the tighter
   case, and even if every re-key landed inside the 90-day window it would be
-  25 against 100. There is room to schedule. What's missing is a third data
-  point: the feed hadn't republished as of 2026-10-02, so the next one, due
-  around 2026-10-10 on the 9–12 day cadence, is the one to look at. Check
-  `etl_load_log.crashes_removed` then, and revisit the cap if the trend bends
-  upward.
+  25 against 100.
+
+  **Third data point, 2026-10-02: 0 removed, 0 new.** The feed republished
+  (`socrata_updated_at` 10-01T17:37 → 10-02T17:40) and the first Cloud Run
+  delta found nothing changed at all. Re-keys therefore are not concentrated
+  in recent crashes: 25 spread uniformly over 221,289 would put ~0.4 inside
+  the 3,319-crash window, and 0 is consistent with that. The delta cap of 100
+  is not close to binding. This no longer blocks scheduling; keep an eye on
+  `etl_load_log.crashes_removed` on full loads rather than deltas, since only
+  a full load can see re-keys outside the window.
 
 ## ML
 
@@ -38,9 +43,12 @@ there.
   The old estimate added a ~9-day publish cadence to a 3.7-day p99 *reporting*
   lag (crash date → reported date, which is internal to a publication) and got
   13. Those are different quantities, and the binding one is the publication
-  lag. Lag the features to roughly **t−40** unless the next publish says
-  otherwise — confirm by re-measuring `MAX(crash_date)` against
-  `socrata_updated_at` once it lands.
+  lag. Lag the features to roughly **t−40**.
+
+  Confirmed on the next publish, 2026-10-02: `MAX(crash_date)` did **not**
+  move — still 2026-08-24, so the lag grew to 39 days. A republish is not
+  evidence that new crash days arrived; that one only changed the stamp and
+  re-randomized coordinates. Watchdog guard 4 exists because of this.
 
   This makes the forecasting problem harder, not just different: predicting
   the next 7 days from crash data that ends 40 days ago leans much more on

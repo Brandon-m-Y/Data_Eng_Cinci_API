@@ -24,7 +24,7 @@ import os
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from google.cloud import bigquery_datatransfer
 from google.protobuf import field_mask_pb2
 
@@ -46,9 +46,14 @@ def main():
                              'service-account notification does not reach your inbox')
     args = parser.parse_args()
 
-    load_dotenv(REPO_ROOT / '.env')
-    project = os.getenv('GCP_PROJECT_ID')
-    location = os.getenv('GCP_LOCATION') or 'us-east1'
+    # dotenv_values, not load_dotenv: .env sets GOOGLE_APPLICATION_CREDENTIALS
+    # to the pipeline's own key, and exporting it here would make this script
+    # authenticate as the pipeline's service account -- which has no rights to
+    # create a scheduled query. Read the two settings needed and leave the
+    # environment alone, so the client uses your own ADC.
+    env = dotenv_values(REPO_ROOT / '.env')
+    project = os.getenv('GCP_PROJECT_ID') or env.get('GCP_PROJECT_ID')
+    location = os.getenv('GCP_LOCATION') or env.get('GCP_LOCATION') or 'us-east1'
     if not project:
         sys.exit('GCP_PROJECT_ID must be set (.env or the environment).')
 
