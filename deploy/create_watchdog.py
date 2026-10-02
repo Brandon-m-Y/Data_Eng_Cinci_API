@@ -142,22 +142,31 @@ def main():
     if existing and not args.update:
         owner = existing.owner_info.email if existing.owner_info else ''
         installed = existing.params.get('query', '').strip()
-        matches = installed == SQL_PATH.read_text(encoding='utf-8').strip()
+        local = SQL_PATH.read_text(encoding='utf-8').strip()
+        # Three states, not two. Pasting into the console loses a space after
+        # '--' on comment lines, which changes no behaviour at all; saying
+        # "DIFFERS" there trains you to ignore the check that matters.
+        if installed == local:
+            state = 'matches watchdog.sql'
+        elif ''.join(installed.split()) == ''.join(local.split()):
+            state = 'same SQL, whitespace differs (harmless; --update to tidy)'
+        else:
+            state = 'DIFFERS from watchdog.sql'
         print(f'Already exists: {existing.name}\n'
               f'  schedule      : {existing.schedule}\n'
               f'  failure email : {existing.email_preferences.enable_failure_email}\n'
-              f'  mail goes to  : {owner or "NOBODY - owned by a service account"}\n'
-              f'  query         : {"matches watchdog.sql" if matches else "DIFFERS from watchdog.sql"}')
+              f'  mail goes to  : {owner or "NOBODY - no owner recorded"}\n'
+              f'  query         : {state}')
         owned_by_robot = not owner or owner.endswith('.iam.gserviceaccount.com')
         if owned_by_robot and existing.email_preferences.enable_failure_email:
             print('  WARNING: failure email is on, but the owner is a service account,\n'
                   '  which has no mailbox. The checks run; nobody hears about a\n'
                   '  failure. Recreate it owned by a person -- only the BigQuery\n'
                   '  console can do that; see DEPLOY.md step 8.')
-        if not matches:
+        if state.startswith('DIFFERS'):
             print('  WARNING: the deployed query is not the one in this repo.\n'
-                  '    python deploy/create_watchdog.py --update --service-account <SA>')
-        print('Rerun with --update to push a changed watchdog.sql.')
+                  '  Push this repo\'s version with:\n'
+                  '    python deploy/create_watchdog.py --update --as-me')
         return
 
     if existing is None and not args.recreate:
