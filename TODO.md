@@ -98,7 +98,9 @@ Remaining, in order:
 - [x] **Watchdog installed and its email proven** (step 8). Created in the
       BigQuery console, owned by a person, daily at 14:00 UTC. A forced
       failure delivered mail on 2026-10-02.
-- [ ] Cloud Scheduler triggers (step 9)
+- [x] Cloud Scheduler triggers live (step 9). Verified by firing one by
+      hand: scheduler at 20:10:21, Cloud Run execution at 20:10:22, fact
+      committed, panel rebuilt, `succeeded`, lease released. 184s.
 - [ ] Cloud Monitoring policy for failed executions (step 10)
 - [ ] Retire the local service-account key for ADC (step 11)
 - [ ] Workload Identity Federation, then let the workflow deploy (Appendix A)

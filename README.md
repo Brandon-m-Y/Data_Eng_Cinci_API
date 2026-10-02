@@ -373,7 +373,10 @@ On Windows, Docker Desktop needs WSL 2. If its engine won't start, run
 - [x] Watchdog scheduled query installed and its email proven: created in
       the BigQuery console so a person owns it, daily at 14:00 UTC, and a
       forced failure delivered mail (2026-10-02)
-- [ ] Cloud Scheduler triggers: `--delta` Mon–Sat, `--full` Sun (step 9)
+- [x] Cloud Scheduler triggers live: `--delta` Mon–Sat, `--full` Sun, 06:00
+      America/New_York. End-to-end verified 2026-10-02 by firing one by hand
+      — trigger to execution in one second, finishing `succeeded` with the
+      lease released.
 - [ ] Cloud Monitoring policy for failed executions (step 10)
 - [ ] Retire the local service-account key for ADC (step 11)
 - [ ] Workload Identity Federation, so the GitHub Actions workflow can run
