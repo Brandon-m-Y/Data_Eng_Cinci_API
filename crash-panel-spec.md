@@ -107,14 +107,61 @@ g = panel.groupby("hood")["crashes"]
 
 panel["lag_7"]   = g.shift(7)
 panel["lag_364"] = g.shift(364)                                   # same weekday, prior year
-panel["roll_28"] = g.shift(1).rolling(28, min_periods=14).mean()
-panel["roll_91"] = g.shift(1).rolling(91, min_periods=30).mean()
+panel["roll_28"] = g.transform(lambda s: s.shift(1).rolling(28, min_periods=14).mean())
+panel["roll_91"] = g.transform(lambda s: s.shift(1).rolling(91, min_periods=30).mean())
 ```
 
 **The `.shift(1)` before `.rolling()` is mandatory.** Without it the window
 includes the current day and the model sees its own target. This is the primary
 failure mode for this project: validation looks excellent and the model is
 worthless.
+
+Keep the rolling operation inside the grouped transform: rolling on the Series
+returned by `g.shift(1)` would cross neighborhood boundaries. These features
+describe retrospective event history. Before using them for forecasting, define
+the prediction issue time and use counts available at that time (including
+reporting delays and later amendments). A target-day weather observation is not
+a forecast available before that day. The SQL panel is not an as-of feature store.
+
+### Forecasting target (decided 2026-10-01)
+
+**Predict the next 7 days of crashes per neighborhood**, with
+`cpd_neighborhood` as the canonical cell (53 neighborhoods; it is the geography
+the reporting agency uses, and the least sparse of the three schemes).
+
+Daily counts at this grain are too sparse to model honestly: 0.84 crashes per
+cell-day with 54% zeros, so a next-day model mostly predicts 0 or 1 and shows
+no skill over a seasonal baseline. Weekly totals average about 6 per
+neighborhood, which puts nearly every cell above zero and makes a negative
+binomial the natural baseline.
+
+**The panel provides the label.** `crashes_next_7` on a row for day *d* is the
+number of crashes in that cell over *d+1 … d+7*. It is NULL for the last 7 days
+of the panel, where the window would run past the end and return a short sum
+that looks like a quiet week. Train on `WHERE crashes_next_7 IS NOT NULL`, and
+never feed `crashes` for day *d* or later into a model predicting it. Two
+assertions guard the column on every build: the label is recomputed from the
+seven following days of its own cell, and the unlabelled rows must be exactly
+seven per cell.
+
+Two things the panel still does not do for you:
+
+- **Lag the features to the issue time.** The panel's lags are event-time
+  history. Two separate delays sit between a crash and your knowing about it:
+  the per-crash reporting lag, whose p99 is 3.7 days and which the panel's
+  7-day end buffer already absorbs, and the feed's publish cadence — the two
+  publishes seen so far were 9 days apart. At an arbitrary issue time *t* the
+  freshest trustworthy crash day is therefore roughly *t − 13*, not *t − 1*.
+  A model trained on the panel's lags as-is will look better than it can
+  perform.
+- **Use forecast weather, not observed.** The weather columns are
+  observations. A model that reads the target week's actual rainfall cannot be
+  run in advance. Either join a forecast product as of the issue time, or drop
+  weather from the forecasting feature set and keep it for retrospective
+  analysis only.
+
+The panel stays event-time and serves both uses. The as-of shift belongs in the
+training pipeline, where the issue time is known.
 
 ### Calendar
 
@@ -131,6 +178,25 @@ panel["doy_cos"] = np.cos(2*np.pi*panel["day"].dt.dayofyear/365.25)
   broadcasts across all neighborhoods.
 - **Static neighborhood attributes** — road miles, intersection count, ODOT AADT,
   ACS block-group demographics. Join on `hood` alone.
+
+- **Distance to downtown** — built 2026-10-01, no external source needed.
+  `distance_to_cbd_km` is the geodesic distance from the cell's centre to
+  Fountain Square (39.1011, −84.5125), Cincinnati's central square at Fifth
+  and Vine. Derived in the panel build from the fact's own coordinates rather
+  than seeded into `ml_cell_attributes`, so there is nothing to maintain by
+  hand and it cannot drift from whichever `p_cell_scheme` is in use.
+
+  The cell's centre is the **marginal median** of its crash coordinates, not
+  the mean. The city fuzzes each row's coordinates (~106 m typical) and about
+  3.7% of rows land over 2 km from their own address block, so a mean would
+  chase the bad geocodes; a median over hundreds of crashes ignores both. The
+  build asserts that every panel cell gets a non-NULL distance, so a cell with
+  no usable coordinates fails the build instead of silently becoming a missing
+  feature for all ~3,900 of its rows.
+
+  It is static per cell and constant over time, so it carries no leakage. It
+  is a crude proxy for urbanness, and it is **not** an exposure denominator —
+  see Step 6; use it alongside AADT and road miles, not instead of them.
 
 Both are one-key merges because the spine already exists. That is the payoff for
 building the index first.

@@ -19,3 +19,4 @@ data/
 *.csv
 *.parquet
 requirements-dev.txt
+tests/

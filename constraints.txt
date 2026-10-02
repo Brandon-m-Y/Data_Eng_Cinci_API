@@ -1,0 +1,39 @@
+# Every package the image installs, direct and transitive, at the versions the
+# pipeline was tested with (pip freeze of the image, 2026-09-19). The Dockerfile
+# installs requirements.txt with `-c constraints.txt`, so a rebuild can't pull a
+# new numpy or protobuf without a code change. To upgrade: edit
+# requirements.txt, build without -c, test, and regenerate this file with
+#   docker run --rm --entrypoint pip <image> freeze
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+cryptography==50.0.1
+db-dtypes==1.7.1
+google-api-core==2.38.0
+google-auth==2.56.0
+google-cloud-bigquery==3.42.2
+google-cloud-core==2.7.0
+google-crc32c==1.8.0
+google-resumable-media==2.10.2
+googleapis-common-protos==1.75.3
+grpcio==1.84.0
+grpcio-status==1.84.0
+idna==3.20
+numpy==2.5.3
+opentelemetry-api==1.44.0
+packaging==26.3
+pandas==2.3.1
+proto-plus==1.28.4
+protobuf==7.36.2
+pyarrow==24.0.0
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pycparser==3.0
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.2
+pytz==2026.3.post1
+requests==2.34.2
+six==1.17.0
+typing_extensions==4.16.0
+tzdata==2026.4
+urllib3==2.8.0

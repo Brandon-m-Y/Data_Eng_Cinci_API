@@ -1,6 +1,7 @@
-# Secrets
+# Secrets. Every *.json: a service-account key under any name must never
+# reach this public repo, and the project tracks no JSON files.
 .env
-cincinnati-open-crash-data-*.json
+*.json
 
 # Python
 __pycache__/

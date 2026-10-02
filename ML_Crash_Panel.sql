@@ -23,7 +23,9 @@
 -- person (~1.96 per crash); counting rows would inflate multi-occupant
 -- crashes and bias the panel toward severe events. Measured: neighborhood
 -- and crash date never differ between person rows of the same crash
--- (0 of 221,289), so the crash-level rollup is exact.
+-- (0 of 221,289 at that measurement). Section 3 reports current disagreements
+-- across all fact rows before any date filtering. MAX provides deterministic
+-- placement when the publisher supplies inconsistent person rows.
 --
 -- COVERAGE (measured 2026-09 on 221,289 crashes, Run_Pipeline --full):
 --   start 2016-01-01  The feed begins Nov 2012. Mid-2013 to mid-2014 runs
@@ -99,7 +101,15 @@ DECLARE p_end_buffer_days INT64  DEFAULT 7;
 DECLARE p_valid_start     DATE   DEFAULT DATE '2024-01-01';   -- train < this
 DECLARE p_test_start      DATE   DEFAULT DATE '2025-01-01';   -- valid < this <= test
 DECLARE p_hours_in_cell   INT64  DEFAULT 24;
+DECLARE p_min_cell_crashes INT64 DEFAULT 100;  -- a cell needs this much history to join
 DECLARE p_end             DATE;
+
+-- Downtown anchor for distance_to_cbd_km: Fountain Square, Fifth and Vine.
+-- Star_Schema_ETL.sql Section 5 declares the same point for the row-level
+-- fact column and documents how it was checked; change both together.
+-- ST_GEOGPOINT takes longitude first.
+DECLARE cbd_lon FLOAT64 DEFAULT -84.5125;
+DECLARE cbd_lat FLOAT64 DEFAULT  39.1011;
 
 SET p_end = (SELECT DATE_SUB(MAX(crash_date), INTERVAL p_end_buffer_days DAY)
              FROM crashes.fact_crash_person
@@ -108,8 +118,18 @@ SET p_end = (SELECT DATE_SUB(MAX(crash_date), INTERVAL p_end_buffer_days DAY)
 ASSERT p_cell_scheme IN ('cpd_neighborhood', 'sna_neighborhood', 'community_council_neighborhood')
   AS 'p_cell_scheme must name a dim_location neighborhood column';
 
--- Step 2 of the spec: one row per crash. MAX is exact given the
--- consistency measured above, and deterministic unlike ANY_VALUE.
+-- Declared primary keys are NOT ENFORCED: reject duplicate join keys before
+-- joining or calculating window functions, rather than discovering fan-out later.
+ASSERT NOT EXISTS (
+  SELECT day FROM crashes.ml_weather_daily GROUP BY day HAVING COUNT(*) > 1
+) AS 'Duplicate weather day: exactly one station observation per day is required';
+ASSERT NOT EXISTS (
+  SELECT cell_scheme, cell_id FROM crashes.ml_cell_attributes
+  GROUP BY cell_scheme, cell_id HAVING COUNT(*) > 1
+) AS 'Duplicate cell attribute key: (cell_scheme, cell_id) must be unique';
+
+-- Step 2 of the spec: one row per crash. MAX is deterministic; disagreements
+-- in source placement are reported separately over the unfiltered fact in Section 3.
 CREATE TEMP TABLE crash_cells AS
 SELECT
   f.instanceid,
@@ -177,12 +197,65 @@ FROM (SELECT d FROM fixed
 -- spec's shift(1) before rolling(). A frame ending at CURRENT ROW would
 -- include the target in its own feature. The spine is complete, so N rows
 -- back is exactly N days back.
+-- These are retrospective event-time features. They do not reconstruct which
+-- reports/amendments were available at a historical prediction issue time.
+-- The end buffer matures targets, not feature availability. Target-day observed
+-- weather must not be used as if it were a weather forecast issued beforehand.
+-- Which cells the panel covers. A neighborhood joins only once it has
+-- p_min_cell_crashes crashes across the whole window: one misspelling, or one
+-- crash geocoded into a place the city doesn't really use, would otherwise add
+-- a cell that is ~100% zeros and drag down every pooled model. The threshold
+-- is self-maintaining -- a genuinely new neighborhood crosses it on its own --
+-- and excluded cells are listed in the Section 3 report, so a cell sitting
+-- just under it is visible rather than silently dropped.
+CREATE TEMP TABLE panel_cells AS
+SELECT cell_id, COUNT(*) AS crashes
+FROM crash_cells
+WHERE cell_id IS NOT NULL
+GROUP BY cell_id
+HAVING COUNT(*) >= p_min_cell_crashes;
+
+ASSERT (SELECT COUNT(*) FROM panel_cells) > 0
+  AS 'No neighborhood reaches p_min_cell_crashes; check the cell scheme and the window';
+
+-- Static geography per cell: how far the neighborhood sits from downtown.
+-- Derived from the fact's own coordinates rather than seeded into
+-- ml_cell_attributes, so there is nothing to maintain by hand and it can
+-- never drift from whichever cell scheme is in use.
+--
+-- The centre is the MARGINAL MEDIAN of the cell's crash coordinates, not the
+-- mean. The published coordinates are fuzzed per row (~106 m) and about 3.7%
+-- sit over 2 km from their own address block, so a mean would chase those
+-- outliers; with hundreds of crashes per cell the median ignores both. This
+-- is the distance from the cell's centre to downtown, which is what a model
+-- wants from a static cell attribute -- not the median of the per-crash
+-- distances, which is a different and noisier quantity.
+CREATE TEMP TABLE cell_distance AS
+SELECT
+  c.cell_id,
+  ROUND(ST_DISTANCE(
+          ST_GEOGPOINT(APPROX_QUANTILES(f.longitude, 2)[OFFSET(1)],
+                       APPROX_QUANTILES(f.latitude,  2)[OFFSET(1)]),
+          ST_GEOGPOINT(cbd_lon, cbd_lat)) / 1000, 3) AS distance_to_cbd_km
+FROM crash_cells c
+JOIN crashes.fact_crash_person f USING (instanceid)
+WHERE c.cell_id IS NOT NULL AND f.latitude IS NOT NULL AND f.longitude IS NOT NULL
+GROUP BY c.cell_id;
+
+-- A cell with no usable coordinate at all would join to NULL and quietly
+-- become a missing feature for every one of its ~3,900 rows.
+ASSERT NOT EXISTS (
+  SELECT 1 FROM panel_cells pc
+  LEFT JOIN cell_distance cd USING (cell_id)
+  WHERE cd.distance_to_cbd_km IS NULL
+) AS 'A panel cell has no usable coordinates, so its distance to downtown is unknown';
+
 -- The joined tables are backtick-quoted because the target column is named
 -- `crashes`, like the dataset: after FROM grid, a bare crashes.dim_date
 -- would resolve as a field of that column.
 CREATE TEMP TABLE panel AS
 WITH cells AS (
-  SELECT DISTINCT cell_id FROM crash_cells WHERE cell_id IS NOT NULL
+  SELECT cell_id FROM panel_cells
 ),
 days AS (
   SELECT day FROM UNNEST(GENERATE_DATE_ARRAY(p_start, p_end)) AS day
@@ -203,7 +276,16 @@ SELECT
   p_cell_scheme                                   AS cell_scheme,
   g.cell_id,
   g.day,
-  g.crashes,                                      -- target
+  g.crashes,                                      -- same-day count: history, not the label
+
+  -- FORECAST TARGET: crashes in this cell over the next 7 days (d+1 .. d+7).
+  -- NULL for the last 7 days of the panel, where the window would run past
+  -- p_end and silently return a short sum. The grid is dense (every cell x
+  -- every day), so ROWS and RANGE agree here. The horizon is deliberately
+  -- literal in both the frame and the column name: changing it means editing
+  -- both, plus crash-panel-spec.md.
+  IF(g.day <= DATE_SUB(p_end, INTERVAL 7 DAY),
+     SUM(g.crashes) OVER wnext, NULL)             AS crashes_next_7,
 
   -- Lags (NULL until a cell has enough history, like pandas NaN)
   LAG(g.crashes, 7)   OVER w                      AS lag_7,
@@ -224,6 +306,12 @@ SELECT
 
   -- Static cell attributes (join on cell)
   ca.road_miles, ca.intersection_count, ca.aadt, ca.population,
+
+  -- Distance from the cell's centre to downtown (Fountain Square), in km.
+  -- Static per cell and constant over time, so it carries no leakage: it
+  -- separates dense central cells from outlying ones without telling the
+  -- model anything about the future.
+  cd.distance_to_cbd_km,
 
   -- Step 6: exposure. Pass LN(exposure) as the model offset
   -- (statsmodels offset=, LightGBM init_score, XGBoost base_margin).
@@ -252,24 +340,48 @@ LEFT JOIN holidays h                  ON h.day = g.day
 LEFT JOIN `crashes.ml_weather_daily` wx ON wx.day = g.day
 LEFT JOIN `crashes.ml_cell_attributes` ca
        ON ca.cell_scheme = p_cell_scheme AND ca.cell_id = g.cell_id
-WINDOW w   AS (PARTITION BY g.cell_id ORDER BY g.day),
-       w28 AS (w ROWS BETWEEN 28 PRECEDING AND 1 PRECEDING),
-       w91 AS (w ROWS BETWEEN 91 PRECEDING AND 1 PRECEDING);
+LEFT JOIN cell_distance cd            ON cd.cell_id = g.cell_id
+WINDOW w     AS (PARTITION BY g.cell_id ORDER BY g.day),
+       w28   AS (w ROWS BETWEEN 28 PRECEDING AND 1 PRECEDING),
+       w91   AS (w ROWS BETWEEN 91 PRECEDING AND 1 PRECEDING),
+       wnext AS (w ROWS BETWEEN 1 FOLLOWING AND 7 FOLLOWING);
 
 -- Sum: every crash with a cell lands in exactly one panel row.
 ASSERT (SELECT SUM(crashes) FROM panel)
-     = (SELECT COUNT(*) FROM crash_cells WHERE cell_id IS NOT NULL)
-  AS 'Sum check failed: panel crashes != crashes with a cell';
+     = (SELECT SUM(crashes) FROM panel_cells)
+  AS 'Sum check failed: panel crashes != crashes in the cells the panel covers';
 
 -- Row count: the grid is complete, cells x days, with no duplicate cell-day
 -- (a second weather row per day would fail here).
 ASSERT (SELECT COUNT(*) FROM panel)
-     = (SELECT COUNT(DISTINCT cell_id) FROM crash_cells WHERE cell_id IS NOT NULL)
-       * (DATE_DIFF(p_end, p_start, DAY) + 1)
+     = (SELECT COUNT(*) FROM panel_cells) * (DATE_DIFF(p_end, p_start, DAY) + 1)
   AS 'Row count check failed: panel is not cells x days';
 ASSERT (SELECT COUNT(*) FROM panel)
      = (SELECT COUNT(DISTINCT FORMAT('%s|%t', cell_id, day)) FROM panel)
   AS 'Row count check failed: duplicate (cell_id, day) rows';
+
+-- Target: recompute it from the seven strictly-following days of the same
+-- cell. The lag checks below prove the features never see the future. This
+-- proves the label does, and that it covers exactly seven days.
+ASSERT NOT EXISTS (
+  SELECT 1
+  FROM panel p
+  LEFT JOIN (
+    SELECT a.cell_id, a.day, SUM(b.crashes) AS next_7
+    FROM panel a
+    JOIN panel b
+      ON b.cell_id = a.cell_id
+     AND b.day BETWEEN DATE_ADD(a.day, INTERVAL 1 DAY) AND DATE_ADD(a.day, INTERVAL 7 DAY)
+    GROUP BY a.cell_id, a.day
+    HAVING COUNT(*) = 7
+  ) r ON r.cell_id = p.cell_id AND r.day = p.day
+  WHERE p.crashes_next_7 IS DISTINCT FROM r.next_7
+) AS 'Target check failed: crashes_next_7 is not the next seven days of its own cell';
+
+-- Exactly the last seven days of every cell are unlabelled, no more and no less.
+ASSERT (SELECT COUNTIF(crashes_next_7 IS NULL) FROM panel)
+     = (SELECT COUNT(*) FROM panel_cells) * 7
+  AS 'Target check failed: rows without a target are not exactly the last seven days per cell';
 
 -- Leakage: recompute every lag feature from strictly prior days of the same
 -- cell (q.day <= p.day - 1) by self-join and require an exact match. A frame
@@ -309,7 +421,7 @@ ASSERT NOT EXISTS (SELECT 1 FROM panel WHERE NOT exposure > 0)
 
 -- Grain sanity: the spec's stop condition. Above 95% zeros the grain is too
 -- fine for a count model.
-ASSERT (SELECT COUNTIF(crashes = 0) / COUNT(*) FROM panel) < 0.95
+ASSERT (SELECT SAFE_DIVIDE(COUNTIF(crashes = 0), COUNT(*)) FROM panel) < 0.95
   AS 'Zero fraction >= 95%: grain is too fine';
 
 -- Publish. Clustered by split so train/valid/test reads prune.
@@ -333,19 +445,96 @@ SELECT cell_scheme,
        COUNT(*)                                           AS panel_rows,
        SUM(crashes)                                       AS crashes,
        ROUND(AVG(crashes), 3)                             AS mean_crashes,
-       ROUND(COUNTIF(crashes = 0) / COUNT(*), 3)          AS zero_fraction,
-       ROUND(VARIANCE(crashes) / AVG(crashes), 2)         AS dispersion,
+       COUNTIF(crashes_next_7 IS NOT NULL)                AS labelled_rows,
+       ROUND(AVG(crashes_next_7), 2)                      AS mean_next_7,
+       ROUND(SAFE_DIVIDE(COUNTIF(crashes_next_7 = 0), COUNTIF(crashes_next_7 IS NOT NULL)), 3)
+                                                          AS zero_fraction_next_7,
+       ROUND(SAFE_DIVIDE(COUNTIF(crashes = 0), COUNT(*)), 3) AS zero_fraction,
+       ROUND(SAFE_DIVIDE(VARIANCE(crashes), AVG(crashes)), 2) AS dispersion,
        MAX(crashes)                                       AS max_cell_day,
+       ROUND(MIN(distance_to_cbd_km), 2)                  AS nearest_cell_km,
+       ROUND(MAX(distance_to_cbd_km), 2)                  AS farthest_cell_km,
        ANY_VALUE(exposure_source)                         AS exposure_source
 FROM crashes.ml_crash_panel
 GROUP BY cell_scheme;
+
+-- Distance sanity, printed every build: the nearest cell to the anchor should
+-- be the central business district and the farthest should be on the city
+-- edge. If the anchor is ever moved or mistyped, this ordering breaks here
+-- before anything trains on it.
+WITH ranked AS (
+  SELECT cell_id, ANY_VALUE(distance_to_cbd_km) AS km
+  FROM crashes.ml_crash_panel GROUP BY cell_id
+),
+ends AS (
+  SELECT cell_id, km,
+         ROW_NUMBER() OVER (ORDER BY km)      AS near_rank,
+         ROW_NUMBER() OVER (ORDER BY km DESC) AS far_rank
+  FROM ranked
+)
+SELECT IF(near_rank <= 5, 'nearest', 'farthest') AS edge, cell_id, km
+FROM ends
+WHERE near_rank <= 5 OR far_rank <= 5
+ORDER BY km;
 
 SELECT split,
        MIN(day)                                           AS first_day,
        MAX(day)                                           AS last_day,
        COUNT(*)                                           AS panel_rows,
        ROUND(AVG(crashes), 3)                             AS mean_crashes,
-       ROUND(COUNTIF(crashes = 0) / COUNT(*), 3)          AS zero_fraction
+       ROUND(SAFE_DIVIDE(COUNTIF(crashes = 0), COUNT(*)), 3) AS zero_fraction
 FROM crashes.ml_crash_panel
 GROUP BY split
 ORDER BY first_day;
+
+-- Placement quality over ALL fact rows, before the panel date filter or MAX
+-- rollup can hide disagreements. JSON preserves NULL as a distinct value.
+WITH placements AS (
+  SELECT f.instanceid, scheme,
+         COUNT(DISTINCT TO_JSON_STRING(f.crash_date)) AS date_values,
+         COUNT(DISTINCT TO_JSON_STRING(NULLIF(UPPER(CASE scheme
+           WHEN 'cpd_neighborhood' THEN l.cpd_neighborhood
+           WHEN 'sna_neighborhood' THEN l.sna_neighborhood
+           WHEN 'community_council_neighborhood' THEN l.community_council_neighborhood
+         END), 'N/A'))) AS cell_values
+  FROM crashes.fact_crash_person f
+  JOIN crashes.dim_location l USING (location_key)
+  CROSS JOIN UNNEST(['cpd_neighborhood', 'sna_neighborhood',
+                    'community_council_neighborhood']) AS scheme
+  GROUP BY f.instanceid, scheme
+)
+SELECT scheme AS cell_scheme,
+       COUNTIF(date_values > 1) AS crashes_disagree_on_day,
+       COUNTIF(cell_values > 1) AS crashes_disagree_on_cell,
+       COUNTIF(date_values > 1 OR cell_values > 1) AS crashes_with_placement_disagreement
+FROM placements
+GROUP BY scheme;
+
+-- Neighborhoods the minimum-history threshold held out. A real neighborhood
+-- sitting just under the threshold should be visible here, not silently
+-- missing; a line with a handful of crashes and a name close to a real
+-- neighborhood is the misspelling the threshold exists to catch.
+WITH bounds AS (
+  SELECT MAX(cell_scheme) AS scheme, MIN(day) AS first_day, MAX(day) AS last_day
+  FROM crashes.ml_crash_panel
+),
+crash_cell AS (
+  SELECT f.instanceid,
+         MAX(NULLIF(UPPER(CASE (SELECT scheme FROM bounds)
+           WHEN 'cpd_neighborhood'               THEN l.cpd_neighborhood
+           WHEN 'sna_neighborhood'               THEN l.sna_neighborhood
+           WHEN 'community_council_neighborhood' THEN l.community_council_neighborhood
+         END), 'N/A')) AS cell_id
+  FROM crashes.fact_crash_person f
+  JOIN crashes.dim_location l USING (location_key)
+  WHERE f.crash_date BETWEEN (SELECT first_day FROM bounds) AND (SELECT last_day FROM bounds)
+  GROUP BY f.instanceid
+)
+SELECT (SELECT scheme FROM bounds) AS cell_scheme,
+       cell_id                     AS excluded_cell,
+       COUNT(*)                    AS crashes_in_window
+FROM crash_cell
+WHERE cell_id IS NOT NULL
+  AND cell_id NOT IN (SELECT DISTINCT cell_id FROM crashes.ml_crash_panel)
+GROUP BY cell_id
+ORDER BY crashes_in_window DESC;

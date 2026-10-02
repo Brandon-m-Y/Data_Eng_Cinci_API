@@ -2,13 +2,15 @@
 -- Cincinnati Traffic Crash Reports (CPD) — Star Schema, BigQuery
 -- Source: Socrata dataset rvmt-pkmq (data.cincinnati-oh.gov)
 -- Manual (state-anchored) surrogate key pattern
--- Run order: Sections 1, 2, 7 once (Run_Pipeline.py --setup),
---            Sections 4, 5, 6, 9 every load (--delta or --full).
---            Section 3 is handled by the Python loader (WRITE_TRUNCATE).
+-- Run order: Section 10, then 1, 2, 7 on --setup (safe to rerun);
+--            Sections 3, 4, 5, 6, 9 every load (--delta or --full);
+--            Section 11 only when a load fails.
 --            Section 8 is retired (folded into Section 5).
---            Sections 5 and 9 take query parameters (@window_start, ...)
---            supplied by Run_Pipeline.py.
--- Dataset name `crashes` matches GCP_DATASET in .env
+--            Sections 3, 4, 5, 9 and 11 take query parameters (@window_start,
+--            @reprocess, @load_id, ...) supplied by Run_Pipeline.py, which also
+--            holds the ETL lease (Section 10) for the whole run.
+-- The dataset is written `crashes` so this file runs as-is in the console;
+-- Run_Pipeline.py substitutes GCP_DATASET for it (Pipeline_Config.render).
 -- ============================================================
 
 
@@ -219,8 +221,12 @@ CREATE TABLE IF NOT EXISTS crashes.fact_crash_person (
   crash_date           DATE,                -- carried into the fact for partitioning
   crash_datetime       DATETIME,
   reporting_lag_hours  FLOAT64,             -- reported minus occurred; negative = bad data
-  latitude             FLOAT64,             -- per unit; NULL if missing or outside Hamilton County
-  longitude            FLOAT64,
+  latitude             FLOAT64,             -- per unit; NULL as a PAIR with longitude if
+  longitude            FLOAT64,              -- missing or outside Hamilton County
+  -- Geodesic metres from Fountain Square, the centre of downtown (Section 5).
+  -- Derived from latitude/longitude, so it inherits their published fuzz:
+  -- usable in aggregate, meaningless for a single crash. See Section 5.
+  distance_to_cbd_m    FLOAT64,
   -- Measures are INT64, not BOOL, so they're additive: SUM(is_fatal) is a
   -- fatality count, AVG(is_injured) an injury rate.
   person_count         INT64  NOT NULL,     -- always 1
@@ -244,16 +250,20 @@ CREATE TABLE IF NOT EXISTS crashes.fact_crash_person (
 PARTITION BY DATE_TRUNC(crash_date, MONTH)
 CLUSTER BY crash_type_key, person_profile_key, location_key;
 
--- ETL audit: one row per pipeline load (Section 9 writes it). window_start is
--- the crash-date watermark a delta load pulled from; NULL on a full load.
+-- ETL audit: one row per pipeline load. Section 5 inserts it inside the fact
+-- transaction (status 'fact_committed'), Section 9 marks it 'succeeded' once
+-- the ML panel is published, and Section 11 marks it 'failed' (inserting it
+-- if the load failed before the fact commit). fact_committed_at says whether
+-- a failed load had already changed the fact. window_start is the crash-date
+-- watermark a delta load pulled from; NULL on a full load.
 -- socrata_updated_at records which Socrata publish the load read — the one
 -- use :updated_at has on this feed (see Section 3).
 CREATE TABLE IF NOT EXISTS crashes.etl_load_log (
   load_id              STRING    NOT NULL,
-  load_mode            STRING    NOT NULL,  -- 'delta' | 'full'
+  load_mode            STRING    NOT NULL,  -- 'delta' | 'full' | 'reprocess'
   window_start         DATE,                -- delta watermark; NULL = full history
   started_at           TIMESTAMP NOT NULL,
-  finished_at          TIMESTAMP NOT NULL,
+  finished_at          TIMESTAMP NOT NULL,  -- last status change
   rows_staged          INT64,
   fact_inserted        INT64,               -- fact rows inserted
   fact_updated         INT64,               -- NULL since the crash-level replace: rows are never updated
@@ -261,27 +271,89 @@ CREATE TABLE IF NOT EXISTS crashes.etl_load_log (
   socrata_updated_at   STRING,              -- publish stamp of the staged feed
   crashes_new          INT64,               -- crashes loaded for the first time
   crashes_changed      INT64,               -- existing crashes rewritten because their content changed
-  crashes_removed      INT64                -- crashes deleted because the feed dropped them
+  crashes_removed      INT64,               -- crashes deleted because the feed dropped them
+  crashes_deferred     INT64,               -- changed crashes a delta left for the next full load (Section 5)
+  status               STRING,              -- 'fact_committed' | 'succeeded' | 'failed'; NULL before 2026-09-19
+  error_message        STRING,              -- first line of the error when status = 'failed'
+  fact_committed_at    TIMESTAMP            -- when this load's fact transaction committed; NULL = fact untouched
 );
 
--- Migrations for tables created before the crash-level replace. CREATE TABLE
+-- Migrations for tables created before these columns existed. CREATE TABLE
 -- IF NOT EXISTS never alters an existing table, so --setup applies these; on
 -- a fresh build they're no-ops.
-ALTER TABLE crashes.fact_crash_person
-  ADD COLUMN IF NOT EXISTS crash_hash STRING;
+-- Avoid consuming metadata-update quota when the schema is already current.
+IF NOT EXISTS (
+  SELECT 1 FROM crashes.INFORMATION_SCHEMA.COLUMNS
+  WHERE table_name = 'fact_crash_person' AND column_name = 'crash_hash'
+) THEN
+  ALTER TABLE crashes.fact_crash_person ADD COLUMN IF NOT EXISTS crash_hash STRING;
+END IF;
 
-ALTER TABLE crashes.etl_load_log
-  ADD COLUMN IF NOT EXISTS crashes_new     INT64,
-  ADD COLUMN IF NOT EXISTS crashes_changed INT64,
-  ADD COLUMN IF NOT EXISTS crashes_removed INT64;
+IF NOT EXISTS (
+  SELECT 1 FROM crashes.INFORMATION_SCHEMA.COLUMNS
+  WHERE table_name = 'fact_crash_person' AND column_name = 'distance_to_cbd_m'
+) THEN
+  ALTER TABLE crashes.fact_crash_person ADD COLUMN IF NOT EXISTS distance_to_cbd_m FLOAT64;
+END IF;
+
+IF (SELECT COUNT(*) FROM crashes.INFORMATION_SCHEMA.COLUMNS
+    WHERE table_name = 'etl_load_log' AND column_name IN (
+      'crashes_new', 'crashes_changed', 'crashes_removed', 'crashes_deferred',
+      'status', 'error_message', 'fact_committed_at')) < 7 THEN
+  ALTER TABLE crashes.etl_load_log
+    ADD COLUMN IF NOT EXISTS crashes_new       INT64,
+    ADD COLUMN IF NOT EXISTS crashes_changed   INT64,
+    ADD COLUMN IF NOT EXISTS crashes_removed   INT64,
+    ADD COLUMN IF NOT EXISTS crashes_deferred  INT64,
+    ADD COLUMN IF NOT EXISTS status            STRING,
+    ADD COLUMN IF NOT EXISTS error_message     STRING,
+    ADD COLUMN IF NOT EXISTS fact_committed_at TIMESTAMP;
+END IF;
 
 -- Cleaning view: the single place normalization happens. Sections 4 and 5
 -- both read it, so a dimension's natural key is computed identically when the
 -- dimension is built and when the fact looks it up. Duplicating these CASE
 -- ladders is how facts silently stop matching and fall through to Unknown.
+-- After changing anything here (or a derived column in Section 4), run
+-- Run_Pipeline.py --full --reprocess: the crash hash covers raw values only,
+-- so an ordinary load would leave unchanged crashes and existing dimension
+-- members on the old logic.
 CREATE OR REPLACE VIEW crashes.vw_stg_crash_person_clean AS
 WITH typed AS (
   SELECT
+    -- Section 5's change-detection input: every raw staged column except the
+    -- ones the publisher regenerates. Built from the staging columns before
+    -- any cast or cleanup, with the same field names and order the stored
+    -- crash_hash values were computed from, so this column must not change
+    -- unless every crash is meant to be rewritten.
+    --
+    -- Excluded, and why:
+    --   :id, :version, :created_at, :updated_at  Socrata system fields, new
+    --     on every publish.
+    --   latitude, longitude  The city fuzzes each ROW's coordinates
+    --     independently for privacy and re-randomizes them on every publish,
+    --     so they cannot witness a content change. Evidence, measured
+    --     2026-10-01: a crash's own person rows sit a median 113 m apart
+    --     (p99 236 m, max 280 m) within a single publish, and 163,056 of
+    --     163,107 multi-row crashes disagree. Across the 09-19 and 10-01
+    --     publishes, 3,317 of 3,317 crashes in the delta window differ when
+    --     coordinates are hashed and 3 of 3,317 when they are not -- hashing
+    --     them rewrites the whole window on every republish and empties
+    --     etl_load_log.crashes_changed of meaning. The coordinates are still
+    --     loaded and stored on the fact; they just don't decide whether a
+    --     crash is rewritten, and a crash rewritten for another reason picks
+    --     up the current ones. Block-level location lives in address and the
+    --     neighborhood columns, which are published once per crash and are
+    --     byte-identical across rows and publishes, and those ARE hashed.
+    TO_JSON_STRING(STRUCT(
+      instanceid, localreportno, crashdate, datecrashreported,
+      address, zip,
+      community_council_neighborhood, cpd_neighborhood, sna_neighborhood,
+      roadclass, roadclassdesc, crashlocation,
+      lightconditionsprimary, roadconditionsprimary, roadcontour, roadsurface, weather,
+      mannerofcrash, crashseverity, crashseverityid,
+      typeofperson, unittype, gender, age, injuries
+    )) AS row_json,
     socrata_id,
     socrata_version,
     SAFE_CAST(socrata_updated_at AS TIMESTAMP)  AS socrata_updated_at,
@@ -298,7 +370,8 @@ WITH typed AS (
     -- Labels with the leading code stripped ('3 - DUSK' -> 'DUSK'). Regex on
     -- the prefix rather than SPLIT(x, ' - '), because some labels contain
     -- their own ' - ' ('3 - DARK - LIGHTED ROADWAY').
-    UPPER(TRIM(REGEXP_REPLACE(lightconditionsprimary, r'^\s*\d+\s*-\s*', ''))) AS light_lbl,
+    REPLACE(UPPER(TRIM(REGEXP_REPLACE(lightconditionsprimary, r'^\s*\d+\s*-\s*', ''))),
+            'LIGHTIED', 'LIGHTED') AS light_lbl,
     UPPER(TRIM(REGEXP_REPLACE(roadconditionsprimary,  r'^\s*\d+\s*-\s*', ''))) AS roadcond_lbl,
     UPPER(TRIM(REGEXP_REPLACE(roadcontour,            r'^\s*\d+\s*-\s*', ''))) AS contour_lbl,
     UPPER(TRIM(REGEXP_REPLACE(roadsurface,            r'^\s*\d+\s*-\s*', ''))) AS surface_lbl,
@@ -313,9 +386,16 @@ WITH typed AS (
 
     NULLIF(TRIM(address), '')                                        AS address,
     -- Outside Hamilton County = geocoding failure, not a real location
-    CASE WHEN SAFE_CAST(latitude  AS FLOAT64) BETWEEN 38.9 AND 39.4
+    -- Hamilton County bounds, applied to the PAIR. Half a coordinate is not
+    -- a location: it can't be mapped, measured or joined, and it reads as
+    -- present to anything that checks one axis. 176 rows of 433K keep one
+    -- axis after the bounds check (140 longitude-only, 36 latitude-only);
+    -- both axes go together so a row either has a usable point or none.
+    CASE WHEN SAFE_CAST(latitude  AS FLOAT64) BETWEEN  38.9 AND  39.4
+          AND SAFE_CAST(longitude AS FLOAT64) BETWEEN -84.9 AND -84.2
          THEN SAFE_CAST(latitude  AS FLOAT64) END                    AS latitude,
-    CASE WHEN SAFE_CAST(longitude AS FLOAT64) BETWEEN -84.9 AND -84.2
+    CASE WHEN SAFE_CAST(latitude  AS FLOAT64) BETWEEN  38.9 AND  39.4
+          AND SAFE_CAST(longitude AS FLOAT64) BETWEEN -84.9 AND -84.2
          THEN SAFE_CAST(longitude AS FLOAT64) END                    AS longitude,
     -- Feed contains '454229', '4202', '452', '31'
     CASE WHEN REGEXP_CONTAINS(zip, r'^\d{5}$') THEN zip END          AS zip,
@@ -340,7 +420,7 @@ canonical AS (
       WHEN light_lbl LIKE 'DAYLIGHT%'                                  THEN 'Daylight'
       WHEN light_lbl LIKE 'DAWN%'                                      THEN 'Dawn'
       WHEN light_lbl LIKE 'DUSK%'                                      THEN 'Dusk'
-      WHEN REPLACE(light_lbl, 'LIGHTIED', 'LIGHTED') LIKE 'DARK%NOT LIGHTED%' THEN 'Dark - Not Lighted'
+      WHEN light_lbl LIKE 'DARK%NOT LIGHTED%'                           THEN 'Dark - Not Lighted'
       WHEN light_lbl LIKE 'DARK%UNKNOWN%'                              THEN 'Dark - Unknown Lighting'
       WHEN light_lbl LIKE 'DARK%LIGHTED%'                              THEN 'Dark - Lighted'
       WHEN light_lbl LIKE 'DARK%'                                      THEN 'Dark - Unknown Lighting'
@@ -536,9 +616,15 @@ SELECT
     ELSE 99
   END AS age_band_sort,
 
-  -- Natural keys, built from RAW values. If a canonicalization rule is later
-  -- corrected, a raw-keyed member keeps its surrogate key and its facts stay
-  -- attached. IFNULL(x, '~') because NULL propagates through FORMAT/CONCAT.
+  -- Natural keys. Conditions, crash type and person profile are built from
+  -- RAW values (plus the derived age_band), so correcting a canonicalization
+  -- rule keeps each member's surrogate key and --reprocess updates its
+  -- attributes in place. Location hashes the CLEANED address, zip,
+  -- neighborhood and road-class values, so changing that cleanup (or the age
+  -- bands) creates new members instead and leaves the old ones orphaned.
+  -- IFNULL(x, '~') because NULL propagates through FORMAT/CONCAT. The '|' and
+  -- '~' separators are unambiguous only because Section 3 rejects raw values
+  -- containing either character.
   FORMAT('%s|%s|%s|%s|%s',
     IFNULL(lightconditionsprimary, '~'), IFNULL(roadconditionsprimary, '~'),
     IFNULL(roadcontour, '~'), IFNULL(roadsurface, '~'), IFNULL(weather, '~')
@@ -655,9 +741,13 @@ WHERE NOT EXISTS (SELECT 1 FROM crashes.dim_person_profile WHERE person_profile_
 
 
 -- ============================================================
--- SECTION 3: STAGE (every load)
--- Python pulls the feed and writes raw rows here with WRITE_TRUNCATE.
--- If loading via SQL for practice, truncate first so reruns don't duplicate.
+-- SECTION 3: STAGING VALIDATION (every load; parameters @window_start,
+-- @expected_rows, @publish_stamp)
+-- Python pulls the feed and replaces crashes.stg_crash_person with it
+-- (WRITE_TRUNCATE; if loading via SQL for practice, TRUNCATE it first).
+-- Get_Data.fetch() has already matched the extract against the source's own
+-- row count and publish stamp. This section checks what actually landed,
+-- BEFORE Section 4 changes anything. Every check fails the load.
 --
 -- WATERMARK: :updated_at does not work as a per-row watermark on this feed.
 -- Measured on the live API: COUNT(DISTINCT :updated_at) = 1 and
@@ -678,12 +768,79 @@ WHERE NOT EXISTS (SELECT 1 FROM crashes.dim_person_profile WHERE person_profile_
 -- the window are picked up by the next --full load.
 -- ============================================================
 
-TRUNCATE TABLE crashes.stg_crash_person;
--- ... Python client library load lands here ...
+DECLARE staged_crashes, staged_people, window_crashes, window_people INT64;
+
+ASSERT (SELECT COUNT(*) FROM crashes.stg_crash_person) > 0
+  AS 'Staging is empty.';
+
+ASSERT NOT EXISTS (
+  SELECT 1 FROM crashes.stg_crash_person
+  WHERE socrata_id IS NULL OR instanceid IS NULL OR socrata_updated_at IS NULL
+) AS 'Staging has rows without :id, instanceid or :updated_at.';
+
+-- One publish. A republish mid-fetch regenerates every :id, and pages
+-- ordered by :id then skip or repeat rows. On this feed every row of a
+-- publish carries the same :updated_at; if Socrata ever stamps rows one by
+-- one, this fails every load and should be dropped in favor of fetch()'s
+-- before-and-after check.
+ASSERT (SELECT COUNT(DISTINCT socrata_updated_at) FROM crashes.stg_crash_person) = 1
+  AS 'Staging spans more than one Socrata publish (the feed republished mid-fetch). Rerun the load.';
+
+-- Staging must be exactly the extract this run's fetch() verified: its row
+-- count and publish stamp. Anything else means staging was replaced.
+ASSERT (SELECT COUNT(*) FROM crashes.stg_crash_person) = @expected_rows
+  AS 'Staging does not hold the row count fetch() verified for this run.';
+ASSERT (SELECT LOGICAL_AND(SAFE_CAST(socrata_updated_at AS TIMESTAMP) = @publish_stamp)
+        FROM crashes.stg_crash_person)
+  AS 'Staging is not the publish fetch() verified for this run.';
+
+-- The same :id twice is acceptable only as an exact repeat
+ASSERT NOT EXISTS (
+  SELECT socrata_id
+  FROM (SELECT DISTINCT * FROM crashes.stg_crash_person)
+  GROUP BY socrata_id
+  HAVING COUNT(*) > 1
+) AS 'Staging holds one :id with two different contents.';
+
+-- The readable natural keys in the cleaning view join values with '|' and
+-- write NULL as '~', so a value containing either could give two different
+-- members one key. None does today; stop rather than merge them. Every key
+-- component is one of these raw columns or derived from them without adding
+-- characters, so checking the raw columns covers every serialized part.
+ASSERT NOT EXISTS (
+  SELECT 1 FROM crashes.stg_crash_person
+  WHERE REGEXP_CONTAINS(CONCAT(
+    IFNULL(lightconditionsprimary, ''), IFNULL(roadconditionsprimary, ''),
+    IFNULL(roadcontour, ''), IFNULL(roadsurface, ''), IFNULL(weather, ''),
+    IFNULL(mannerofcrash, ''), IFNULL(crashseverityid, ''), IFNULL(crashseverity, ''),
+    IFNULL(typeofperson, ''), IFNULL(unittype, ''), IFNULL(gender, ''), IFNULL(injuries, ''),
+    IFNULL(address, ''), IFNULL(zip, ''), IFNULL(community_council_neighborhood, ''),
+    IFNULL(cpd_neighborhood, ''), IFNULL(sna_neighborhood, ''), IFNULL(roadclass, ''),
+    IFNULL(roadclassdesc, ''), IFNULL(crashlocation, '')), r'[|~]')
+) AS 'A natural-key value contains | or ~, which would make dimension keys ambiguous. Switch the keys to TO_JSON_STRING before loading.';
+
+-- Completeness against what the fact already holds for the same window,
+-- counted before anything changes, so a partial extract can't delete or
+-- shrink the rest. People are counted as well as crashes: losing one person
+-- from every crash would leave the crash count intact.
+SET (staged_crashes, staged_people) = (
+  SELECT AS STRUCT COUNT(DISTINCT instanceid), COUNT(DISTINCT socrata_id)
+  FROM crashes.stg_crash_person
+);
+SET (window_crashes, window_people) = (
+  SELECT AS STRUCT COUNT(DISTINCT instanceid), COUNT(*)
+  FROM crashes.fact_crash_person
+  WHERE @window_start IS NULL OR crash_date >= @window_start
+);
+IF staged_crashes < 0.9 * window_crashes OR staged_people < 0.9 * window_people THEN
+  RAISE USING MESSAGE = FORMAT(
+    'Staging holds %d crashes and %d people, but the fact has %d and %d in the load window. Refusing to load: a partial extract would delete the difference.',
+    staged_crashes, staged_people, window_crashes, window_people);
+END IF;
 
 
 -- ============================================================
--- SECTION 4: DIMENSION MERGES (every load)
+-- SECTION 4: DIMENSION MERGES (every load; parameter @reprocess)
 -- The state-anchored pattern. Three parts to notice in each:
 --   1. The USING subquery finds ONLY genuinely new natural keys
 --      (NOT EXISTS against the dimension).
@@ -692,8 +849,14 @@ TRUNCATE TABLE crashes.stg_crash_person;
 --      GREATEST(..., 0) keeps the first real key at 1 rather than 0,
 --      since MAX() over a dimension holding only the -1 member is -1.
 -- Reruns are safe: NOT EXISTS finds nothing new and the merge is a no-op.
--- Insert-only is correct: every attribute is derived from the natural key,
--- so a changed attribute is a new member, not an update.
+-- Insert-only is correct for new DATA: every attribute is derived from the
+-- natural key, so a changed attribute is a new member, not an update. New
+-- LOGIC is the exception: after the cleaning view or a derived column below
+-- changes, --reprocess (@reprocess = TRUE) drops the NOT EXISTS filter and
+-- rewrites the derived attributes of every staged member in place, keeping
+-- its surrogate key. New members then take keys past the max with gaps,
+-- because existing members are numbered too; the gaps are harmless.
+-- The assertions at the end run before Section 5 uses these dimensions.
 -- ============================================================
 
 MERGE crashes.dim_location AS t
@@ -717,12 +880,19 @@ USING (
         ELSE REGEXP_CONTAINS(v.crashloc_lbl, r'INTERSECTION|FIVE-POINT|TRAFFIC CIRCLE')
       END AS is_intersection
     FROM crashes.vw_stg_crash_person_clean v
-    WHERE NOT EXISTS (
+    WHERE @reprocess OR NOT EXISTS (
       SELECT 1 FROM crashes.dim_location d WHERE d.location_nk = v.location_nk
     )
   ) AS s
 ) AS src
 ON t.location_nk = src.location_nk
+WHEN MATCHED AND @reprocess THEN
+  UPDATE SET address = src.address, zip = src.zip,
+             community_council_neighborhood = src.community_council_neighborhood,
+             cpd_neighborhood = src.cpd_neighborhood, sna_neighborhood = src.sna_neighborhood,
+             road_class_code = src.road_class_code, road_class_desc = src.road_class_desc,
+             crash_location_raw = src.crash_location_raw, crash_location = src.crash_location,
+             is_intersection = src.is_intersection
 WHEN NOT MATCHED THEN
   INSERT (location_key, location_nk, address, zip,
           community_council_neighborhood, cpd_neighborhood, sna_neighborhood,
@@ -757,12 +927,22 @@ USING (
       v.weather_norm            AS weather,
       v.weather_norm NOT IN ('Clear', 'Cloudy', 'Other/Unknown', 'Unknown') AS is_adverse_weather
     FROM crashes.vw_stg_crash_person_clean v
-    WHERE NOT EXISTS (
+    WHERE @reprocess OR NOT EXISTS (
       SELECT 1 FROM crashes.dim_conditions d WHERE d.conditions_nk = v.conditions_nk
     )
   ) AS s
 ) AS src
 ON t.conditions_nk = src.conditions_nk
+WHEN MATCHED AND @reprocess THEN
+  UPDATE SET light_conditions_raw = src.light_conditions_raw,
+             light_conditions = src.light_conditions, is_dark = src.is_dark,
+             road_conditions_raw = src.road_conditions_raw,
+             road_conditions = src.road_conditions, is_slick = src.is_slick,
+             road_contour_raw = src.road_contour_raw, road_contour = src.road_contour,
+             is_curve = src.is_curve, is_grade = src.is_grade,
+             road_surface_raw = src.road_surface_raw, road_surface = src.road_surface,
+             weather_raw = src.weather_raw, weather = src.weather,
+             is_adverse_weather = src.is_adverse_weather
 WHEN NOT MATCHED THEN
   INSERT (conditions_key, conditions_nk,
           light_conditions_raw, light_conditions, is_dark,
@@ -798,12 +978,20 @@ USING (
       IF(v.crash_severity_rank = 0, NULL, v.crash_severity_rank  = 5)      AS is_fatal_crash,
       v.coding_era
     FROM crashes.vw_stg_crash_person_clean v
-    WHERE NOT EXISTS (
+    WHERE @reprocess OR NOT EXISTS (
       SELECT 1 FROM crashes.dim_crash_type d WHERE d.crash_type_nk = v.crash_type_nk
     )
   ) AS s
 ) AS src
 ON t.crash_type_nk = src.crash_type_nk
+WHEN MATCHED AND @reprocess THEN
+  UPDATE SET manner_of_crash_raw = src.manner_of_crash_raw,
+             manner_of_crash = src.manner_of_crash, is_collision = src.is_collision,
+             crash_severity_raw = src.crash_severity_raw,
+             crash_severity_id_raw = src.crash_severity_id_raw,
+             crash_severity = src.crash_severity, crash_severity_rank = src.crash_severity_rank,
+             is_injury_crash = src.is_injury_crash, is_fatal_crash = src.is_fatal_crash,
+             coding_era = src.coding_era
 WHEN NOT MATCHED THEN
   INSERT (crash_type_key, crash_type_nk, manner_of_crash_raw, manner_of_crash, is_collision,
           crash_severity_raw, crash_severity_id_raw, crash_severity, crash_severity_rank,
@@ -837,12 +1025,22 @@ USING (
       v.injury_severity_code,
       v.injury_severity_rank
     FROM crashes.vw_stg_crash_person_clean v
-    WHERE NOT EXISTS (
+    WHERE @reprocess OR NOT EXISTS (
       SELECT 1 FROM crashes.dim_person_profile d WHERE d.person_profile_nk = v.person_profile_nk
     )
   ) AS s
 ) AS src
 ON t.person_profile_nk = src.person_profile_nk
+WHEN MATCHED AND @reprocess THEN
+  UPDATE SET type_of_person_raw = src.type_of_person_raw,
+             type_of_person = src.type_of_person, is_motorist = src.is_motorist,
+             unit_type_raw = src.unit_type_raw, unit_type = src.unit_type,
+             unit_category = src.unit_category, gender_raw = src.gender_raw,
+             gender = src.gender, age_band = src.age_band, age_band_sort = src.age_band_sort,
+             injury_severity_raw = src.injury_severity_raw,
+             injury_severity = src.injury_severity,
+             injury_severity_code = src.injury_severity_code,
+             injury_severity_rank = src.injury_severity_rank
 WHEN NOT MATCHED THEN
   INSERT (person_profile_key, person_profile_nk, type_of_person_raw, type_of_person, is_motorist,
           unit_type_raw, unit_type, unit_category, gender_raw, gender, age_band, age_band_sort,
@@ -854,10 +1052,30 @@ WHEN NOT MATCHED THEN
           src.injury_severity_raw, src.injury_severity, src.injury_severity_code,
           src.injury_severity_rank);
 
+-- Key integrity. BigQuery doesn't enforce the declared keys, and Section 5's
+-- lookups need both kinds unique: a repeated natural key would fan a fact row
+-- out to two members, a repeated surrogate key would make a fact row's
+-- dimension ambiguous.
+ASSERT NOT EXISTS (SELECT location_nk FROM crashes.dim_location GROUP BY location_nk HAVING COUNT(*) > 1)
+   AND NOT EXISTS (SELECT location_key FROM crashes.dim_location GROUP BY location_key HAVING COUNT(*) > 1)
+  AS 'dim_location has a duplicate natural or surrogate key.';
+ASSERT NOT EXISTS (SELECT conditions_nk FROM crashes.dim_conditions GROUP BY conditions_nk HAVING COUNT(*) > 1)
+   AND NOT EXISTS (SELECT conditions_key FROM crashes.dim_conditions GROUP BY conditions_key HAVING COUNT(*) > 1)
+  AS 'dim_conditions has a duplicate natural or surrogate key.';
+ASSERT NOT EXISTS (SELECT crash_type_nk FROM crashes.dim_crash_type GROUP BY crash_type_nk HAVING COUNT(*) > 1)
+   AND NOT EXISTS (SELECT crash_type_key FROM crashes.dim_crash_type GROUP BY crash_type_key HAVING COUNT(*) > 1)
+  AS 'dim_crash_type has a duplicate natural or surrogate key.';
+ASSERT NOT EXISTS (SELECT person_profile_nk FROM crashes.dim_person_profile GROUP BY person_profile_nk HAVING COUNT(*) > 1)
+   AND NOT EXISTS (SELECT person_profile_key FROM crashes.dim_person_profile GROUP BY person_profile_key HAVING COUNT(*) > 1)
+  AS 'dim_person_profile has a duplicate natural or surrogate key.';
+
 
 -- ============================================================
--- SECTION 5: FACT LOAD (every load; parameter @window_start) — crash-level
--- replace on instanceid, with delete reconciliation, in one transaction.
+-- SECTION 5: FACT LOAD (every load) — crash-level replace on instanceid, with
+-- delete reconciliation and the load-log row, in one transaction.
+-- Parameters: @window_start, @reprocess, @allow_deletions, @load_id,
+-- @load_mode, @started_at, @rows_staged (all from
+-- Run_Pipeline.section5_params).
 --
 -- Why not MERGE on :id: Socrata regenerates every :id and :version when it
 -- republishes the dataset. On 2026-09-19 all 6,791 rows of a delta window
@@ -867,52 +1085,81 @@ WHEN NOT MATCHED THEN
 -- of change is the whole crash: when anything about a crash changes, all of
 -- its rows are deleted and reinserted.
 --
--- Change detection: crash_hash is an MD5 over the crash's raw staged rows,
--- sorted so row order doesn't matter, leaving out the Socrata system columns
--- that change on every publish. A crash is rewritten only when it's new, its
--- hash differs, or its fact rows disagree with staging (row count, or rows
--- missing a hash, like those loaded before crash_hash existed). A rerun, or a
--- republish with no content changes, rewrites nothing. The hash is built from
--- RAW values, so after changing logic in the cleaning view, TRUNCATE the fact
--- and run --full, or unchanged crashes keep the old derivation.
+-- Change detection: crash_hash is an MD5 over the crash's raw staged rows
+-- (row_json in the cleaning view), sorted so row order doesn't matter, leaving
+-- out what the publisher regenerates: the Socrata system columns, and the
+-- per-row fuzzed latitude/longitude (see the view for the measurements). A crash is
+-- rewritten only when it's new, its hash differs, or its fact rows disagree
+-- with staging (row count, or rows missing a hash). A rerun, or a republish
+-- with no content changes, rewrites nothing. The hash covers RAW values only,
+-- so a cleaning-view change doesn't make any crash look changed:
+-- --reprocess (@reprocess = TRUE) rewrites every staged crash instead.
+--
+-- One read of staging: everything below comes from stg_clean, a snapshot of
+-- the cleaning view taken once, so the stored hash and the inserted rows
+-- always describe the same data. (The ETL lease already stops another run
+-- from replacing staging mid-load; this makes the section safe on its own.)
 --
 -- Delete reconciliation (formerly Section 8): staging holds every current
 -- crash in the loaded window, so a fact crash in that window missing from
 -- staging was deleted upstream.
 --   @window_start = NULL   full load: the window is the whole fact
---   @window_start = date   delta load: only crash_date >= @window_start,
---                          which is exactly what the delta pulled
+--   @window_start = date   delta load: crashes whose fact rows all have
+--                          crash_date >= @window_start
 -- Crashes with a NULL crash_date sit outside every delta window and are only
--- reconciled on a full load. Edge case: a crash whose date is amended to
--- before the window gets deleted here, and the next --full restores it.
+-- reconciled on a full load.
 --
--- Guards, all of which fail the load rather than write a partial result:
---   * Staging must come from one publish. A republish mid-fetch reshuffles
---     :id, and the pages (ordered by :id) then skip or repeat rows.
---   * Staging must hold at least 90% of the crashes the fact has in the
---     window, counted BEFORE anything changes, so a partial fetch or a bad
---     filter can't delete the rest.
---   * After the load, every staged crash must have exactly its staged rows in
---     the fact, all carrying its hash. Otherwise the transaction rolls back.
+-- Delta boundary: a delta sees only rows dated inside its window. A crash
+-- whose existing fact rows lie partly or wholly before the window (a date
+-- amended across the boundary, or person rows with different dates) can't be
+-- judged from that: replacing it would drop the rows the delta can't see.
+-- A delta leaves those crashes alone and counts them as crashes_deferred; the
+-- next --full handles them. Known gaps, both repaired by the next --full:
+-- a crash whose date is amended to before the window looks deleted and is
+-- removed, and a crash whose upstream rows move partly before the window is
+-- rewritten without them.
+--
+-- Checks inside the transaction, any of which rolls everything back:
+--   * no inserted row fell through to an Unknown location, conditions, crash
+--     type or person profile member (Section 4 just created every member);
+--   * every staged crash the load could judge ends with exactly its staged
+--     row count and hash, so a dimension fan-out, which adds rows, fails;
+--   * every crash in the fact carries exactly one non-NULL hash.
+-- Staging's own checks ran in Section 3, before anything changed.
 --
 -- Natural keys are exchanged for surrogate keys here. LEFT JOIN + IFNULL
 -- routes lookup failures to the Unknown members instead of silently dropping
--- rows (which an INNER JOIN would do). QUALIFY drops a row that overlapping
--- API pages staged twice. The final SELECT returns the counts Section 9 logs.
+-- rows (which an INNER JOIN would do); the first check above turns that into
+-- a failure for the four non-date dimensions. The load-log row is inserted in
+-- the same transaction, so a committed fact change always has its log row
+-- (status 'fact_committed'; Section 9 marks it succeeded). The final SELECT
+-- returns the counts Run_Pipeline.py prints.
 -- ============================================================
 
-DECLARE staged_crashes, window_crashes INT64;
 DECLARE rows_inserted, rows_deleted, crashes_removed INT64 DEFAULT 0;
 
-ASSERT (SELECT COUNT(DISTINCT socrata_updated_at) FROM crashes.stg_crash_person) <= 1
-  AS 'Staging spans more than one Socrata publish (the feed republished mid-fetch). Rerun the load.';
+-- Downtown anchor for distance_to_cbd_m: Fountain Square (the Tyler Davidson
+-- Fountain at Fifth and Vine), Cincinnati's central public square and the
+-- conventional centre of the Central Business District.
+--
+-- Checked against this dataset on 2026-10-01 by two robust estimates that
+-- don't depend on each other, both of which land inside the published
+-- coordinate fuzz (~106 m):
+--   median of the 5XX VINE ST block (Fountain Square's own block, n=256)
+--     = (39.101474, -84.513139),               70 m from the anchor
+--   median of the 'C. B. D. / RIVERFRONT' neighborhood (n=30,766)
+--     = (39.101556, -84.511170),              120 m from the anchor
+--
+-- ST_GEOGPOINT takes longitude first. ML_Crash_Panel.sql declares the same
+-- point for its cell-level feature; change both together.
+DECLARE cbd_lon FLOAT64 DEFAULT -84.5125;
+DECLARE cbd_lat FLOAT64 DEFAULT  39.1011;
 
--- One row per staged person
-CREATE TEMP TABLE stg_rows AS
+-- One row per staged person, read from staging once. Section 3 guarantees
+-- a repeated :id is an exact repeat, so keeping any one copy is safe.
+CREATE TEMP TABLE stg_clean AS
 SELECT *
-FROM crashes.stg_crash_person
-WHERE socrata_id IS NOT NULL
-  AND instanceid IS NOT NULL
+FROM crashes.vw_stg_crash_person_clean
 QUALIFY ROW_NUMBER() OVER (PARTITION BY socrata_id ORDER BY socrata_version DESC) = 1;
 
 -- One row per staged crash: content hash and person-row count
@@ -921,53 +1168,77 @@ SELECT
   instanceid,
   TO_HEX(MD5(STRING_AGG(row_json, '\n' ORDER BY row_json))) AS crash_hash,
   COUNT(*)                                                  AS person_rows
-FROM (
-  SELECT
-    instanceid,
-    TO_JSON_STRING(STRUCT(
-      instanceid, localreportno, crashdate, datecrashreported,
-      address, latitude, longitude, zip,
-      community_council_neighborhood, cpd_neighborhood, sna_neighborhood,
-      roadclass, roadclassdesc, crashlocation,
-      lightconditionsprimary, roadconditionsprimary, roadcontour, roadsurface, weather,
-      mannerofcrash, crashseverity, crashseverityid,
-      typeofperson, unittype, gender, age, injuries
-    )) AS row_json
-  FROM stg_rows
-)
+FROM stg_clean
 GROUP BY instanceid;
 
--- Staged crashes to (re)write. A fact crash whose rows don't agree on a
--- single non-NULL hash compares as NULL, so it's always rewritten.
-CREATE TEMP TABLE changed_crash AS
-SELECT s.instanceid, s.crash_hash, f.instanceid IS NULL AS is_new
+-- One row per fact crash, as it stands before this load. A crash whose rows
+-- don't agree on a single non-NULL hash gets a NULL hash, so it compares as
+-- changed. before_window marks what a delta can't judge (see above).
+CREATE TEMP TABLE fact_crash AS
+SELECT
+  instanceid,
+  IF(COUNT(DISTINCT crash_hash) = 1 AND COUNTIF(crash_hash IS NULL) = 0,
+     ANY_VALUE(crash_hash), NULL)                                      AS crash_hash,
+  COUNT(*)                                                             AS person_rows,
+  @window_start IS NOT NULL
+    AND COUNTIF(crash_date IS NULL OR crash_date < @window_start) > 0  AS before_window,
+  @window_start IS NULL
+    OR COUNTIF(crash_date >= @window_start) > 0                        AS in_window
+FROM crashes.fact_crash_person
+GROUP BY instanceid;
+
+-- Staged crashes that differ from the fact (every one on --reprocess) ...
+CREATE TEMP TABLE differing_crash AS
+SELECT s.instanceid, s.crash_hash,
+       f.instanceid IS NULL           AS is_new,
+       IFNULL(f.before_window, FALSE) AS deferred
 FROM stg_crash s
-LEFT JOIN (
-  SELECT
-    instanceid,
-    IF(COUNT(DISTINCT crash_hash) = 1 AND COUNTIF(crash_hash IS NULL) = 0,
-       ANY_VALUE(crash_hash), NULL) AS crash_hash,
-    COUNT(*)                        AS person_rows
-  FROM crashes.fact_crash_person
-  GROUP BY instanceid
-) f ON f.instanceid = s.instanceid
-WHERE f.instanceid IS NULL
+LEFT JOIN fact_crash f ON f.instanceid = s.instanceid
+WHERE @reprocess
+   OR f.instanceid IS NULL
    OR f.crash_hash IS DISTINCT FROM s.crash_hash
    OR f.person_rows != s.person_rows;
 
-SET staged_crashes = (SELECT COUNT(*) FROM stg_crash);
-SET window_crashes = (
-  SELECT COUNT(DISTINCT instanceid) FROM crashes.fact_crash_person
-  WHERE @window_start IS NULL OR crash_date >= @window_start
-);
-IF staged_crashes < 0.9 * window_crashes THEN
+-- ... of which this load rewrites the ones it can judge
+CREATE TEMP TABLE changed_crash AS
+SELECT instanceid, crash_hash, is_new
+FROM differing_crash
+WHERE NOT deferred;
+
+-- Crashes deleted upstream: in the window, wholly, and missing from staging
+CREATE TEMP TABLE removed_crash AS
+SELECT f.instanceid
+FROM fact_crash f
+WHERE f.in_window
+  AND NOT f.before_window
+  AND NOT EXISTS (SELECT 1 FROM stg_crash s WHERE s.instanceid = f.instanceid);
+
+-- Deletion cap: a feed that suddenly lacks many crashes is more likely an
+-- upstream accident than real deletions (a normal full load removes about
+-- 20). Past max(100, 1% of the crashes this load could delete), the operator
+-- decides. The denominator is that deletion-eligible population, not every
+-- crash touching the window: a crash straddling the window start is deferred
+-- and never deleted here, so counting it would raise the cap above what this
+-- load can actually reach.
+IF (SELECT COUNT(*) FROM removed_crash)
+     > GREATEST(100, 0.01 * (SELECT COUNTIF(in_window AND NOT before_window) FROM fact_crash))
+   AND NOT @allow_deletions THEN
   RAISE USING MESSAGE = FORMAT(
-    'Staging holds %d crashes but the fact has %d in the load window. Refusing to load: a partial fetch would delete the difference.',
-    staged_crashes, window_crashes);
+    'This load would delete %d crashes the feed no longer has, over the cap of max(100, 1%% of the crashes it could delete). Check the source, and rerun with --allow-deletions only if the deletions are real.',
+    (SELECT COUNT(*) FROM removed_crash));
 END IF;
 
 BEGIN
   BEGIN TRANSACTION;
+
+  -- Fence: write this load's lease row inside the transaction. If another
+  -- run holds the lease, this matches nothing and the load rolls back; if
+  -- an operator clears it while the transaction is open, the two writes to the
+  -- row conflict and this commit fails.
+  UPDATE crashes.etl_lease
+  SET heartbeat_at = CURRENT_TIMESTAMP()
+  WHERE lease_name = 'pipeline' AND holder = @load_id;
+  ASSERT @@row_count = 1 AS 'This load no longer holds the ETL lease.';
 
   -- Replace: drop every row of a changed crash (a new crash has none) ...
   DELETE FROM crashes.fact_crash_person
@@ -979,6 +1250,7 @@ BEGIN
     (crash_date_key, reported_date_key, crash_time_key, location_key, conditions_key,
      crash_type_key, person_profile_key, instanceid, localreportno, socrata_id,
      crash_date, crash_datetime, reporting_lag_hours, latitude, longitude,
+     distance_to_cbd_m,
      person_count, is_injured, is_fatal, age,
      socrata_version, socrata_updated_at, loaded_at, crash_hash)
   SELECT
@@ -998,6 +1270,12 @@ BEGIN
     DATETIME_DIFF(v.reported_datetime, v.crash_datetime, MINUTE) / 60.0 AS reporting_lag_hours,
     v.latitude,
     v.longitude,
+    -- Geodesic metres on the WGS84 spheroid. NULL in, NULL out: a crash with
+    -- no usable coordinate gets no distance rather than a distance from (0,0).
+    -- One decimal place; the coordinates are fuzzed to ~106 m, so anything
+    -- finer would be invented precision.
+    ROUND(ST_DISTANCE(ST_GEOGPOINT(v.longitude, v.latitude),
+                      ST_GEOGPOINT(cbd_lon, cbd_lat)), 1) AS distance_to_cbd_m,
     1                                       AS person_count,
     IF(v.injury_severity_rank >= 2, 1, 0)   AS is_injured,
     IF(v.injury_severity_rank  = 5, 1, 0)   AS is_fatal,
@@ -1006,7 +1284,7 @@ BEGIN
     v.socrata_updated_at,
     CURRENT_TIMESTAMP()                     AS loaded_at,
     c.crash_hash
-  FROM crashes.vw_stg_crash_person_clean v
+  FROM stg_clean v
   JOIN changed_crash c ON c.instanceid = v.instanceid
   LEFT JOIN crashes.dim_date           dd_c ON dd_c.full_date = DATE(v.crash_datetime)
   LEFT JOIN crashes.dim_date           dd_r ON dd_r.full_date = DATE(v.reported_datetime)
@@ -1015,23 +1293,21 @@ BEGIN
   LEFT JOIN crashes.dim_location       dl   ON dl.location_nk        = v.location_nk
   LEFT JOIN crashes.dim_conditions     dc   ON dc.conditions_nk      = v.conditions_nk
   LEFT JOIN crashes.dim_crash_type     dct  ON dct.crash_type_nk     = v.crash_type_nk
-  LEFT JOIN crashes.dim_person_profile dpp  ON dpp.person_profile_nk = v.person_profile_nk
-  WHERE v.socrata_id IS NOT NULL
-  QUALIFY ROW_NUMBER() OVER (PARTITION BY v.socrata_id ORDER BY v.socrata_version DESC) = 1;
+  LEFT JOIN crashes.dim_person_profile dpp  ON dpp.person_profile_nk = v.person_profile_nk;
   SET rows_inserted = @@row_count;
 
-  -- Reconcile upstream deletes: crashes in the window that staging lacks
-  SET crashes_removed = (
-    SELECT COUNT(DISTINCT instanceid) FROM crashes.fact_crash_person f
-    WHERE (@window_start IS NULL OR f.crash_date >= @window_start)
-      AND NOT EXISTS (SELECT 1 FROM stg_crash s WHERE s.instanceid = f.instanceid)
-  );
-  DELETE FROM crashes.fact_crash_person f
-  WHERE (@window_start IS NULL OR f.crash_date >= @window_start)
-    AND NOT EXISTS (SELECT 1 FROM stg_crash s WHERE s.instanceid = f.instanceid);
+  -- Reconcile upstream deletes
+  DELETE FROM crashes.fact_crash_person
+  WHERE instanceid IN (SELECT instanceid FROM removed_crash);
   SET rows_deleted = rows_deleted + @@row_count;
+  SET crashes_removed = (SELECT COUNT(*) FROM removed_crash);
 
-  -- Every staged crash now has exactly its staged rows, all with its hash
+  ASSERT NOT EXISTS (
+    SELECT 1 FROM crashes.fact_crash_person
+    WHERE instanceid IN (SELECT instanceid FROM changed_crash)
+      AND -1 IN (location_key, conditions_key, crash_type_key, person_profile_key)
+  ) AS 'A new fact row fell through to an Unknown location, conditions, crash type or person profile member: a natural key is computed differently in Sections 4 and 5.';
+
   ASSERT NOT EXISTS (
     SELECT 1
     FROM stg_crash s
@@ -1044,9 +1320,35 @@ BEGIN
       FROM crashes.fact_crash_person
       GROUP BY instanceid
     ) f ON f.instanceid = s.instanceid
-    WHERE f.crash_hash IS DISTINCT FROM s.crash_hash
-       OR f.person_rows IS DISTINCT FROM s.person_rows
-  ) AS 'Post-load check failed: a staged crash does not match its fact rows.';
+    WHERE s.instanceid NOT IN (SELECT instanceid FROM differing_crash WHERE deferred)
+      AND (f.crash_hash IS DISTINCT FROM s.crash_hash
+           OR f.person_rows IS DISTINCT FROM s.person_rows)
+  ) AS 'Post-load check failed: a staged crash does not have exactly its staged row count and hash.';
+
+  ASSERT NOT EXISTS (
+    SELECT instanceid
+    FROM crashes.fact_crash_person
+    GROUP BY instanceid
+    HAVING COUNT(DISTINCT crash_hash) != 1 OR COUNTIF(crash_hash IS NULL) > 0
+  ) AS 'A fact crash has no crash_hash or more than one.';
+
+  ASSERT NOT EXISTS (SELECT 1 FROM crashes.etl_load_log WHERE load_id = @load_id)
+    AS 'This load ID already has an audit record; use a new run ID';
+
+  INSERT INTO crashes.etl_load_log
+    (load_id, load_mode, window_start, started_at, finished_at, rows_staged,
+     fact_inserted, fact_updated, fact_deleted, socrata_updated_at,
+     crashes_new, crashes_changed, crashes_removed, crashes_deferred,
+     status, fact_committed_at)
+  SELECT
+    @load_id, @load_mode, @window_start, @started_at, CURRENT_TIMESTAMP(), @rows_staged,
+    rows_inserted, NULL, rows_deleted,
+    (SELECT FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E3SZ', MAX(socrata_updated_at)) FROM stg_clean),
+    (SELECT COUNTIF(is_new)     FROM changed_crash),
+    (SELECT COUNTIF(NOT is_new) FROM changed_crash),
+    crashes_removed,
+    (SELECT COUNTIF(deferred)   FROM differing_crash),
+    'fact_committed', CURRENT_TIMESTAMP();
 
   COMMIT TRANSACTION;
 EXCEPTION WHEN ERROR THEN
@@ -1055,22 +1357,25 @@ EXCEPTION WHEN ERROR THEN
 END;
 
 SELECT
-  (SELECT COUNTIF(is_new)     FROM changed_crash) AS crashes_new,
-  (SELECT COUNTIF(NOT is_new) FROM changed_crash) AS crashes_changed,
+  (SELECT COUNTIF(is_new)     FROM changed_crash)   AS crashes_new,
+  (SELECT COUNTIF(NOT is_new) FROM changed_crash)   AS crashes_changed,
   crashes_removed,
+  (SELECT COUNTIF(deferred)   FROM differing_crash) AS crashes_deferred,
   rows_inserted,
   rows_deleted;
 
 
 -- ============================================================
 -- SECTION 6: POST-LOAD SANITY CHECKS (run after each load)
+-- Printed, not enforced: the invariants a load depends on are asserted in
+-- Sections 3, 4 and 5 before anything commits. These describe the feed and
+-- the whole fact, so watch them for jumps.
 -- ============================================================
 
 -- Rows that fell through to Unknown members. Expected on the current feed:
 -- crash dates 7 (5 NULL crashdate + 2 dated 1900-02-06), reported dates 7
 -- (NULL datecrashreported), times 5 (NULL crashdate). The four junk and
--- location dimensions must be 0 — anything else means a natural key is
--- computed differently in Sections 4 and 5.
+-- location dimensions must be 0 (Section 5 fails a load that adds one).
 SELECT COUNTIF(crash_date_key     = 19000101) AS unknown_crash_dates,
        COUNTIF(reported_date_key  = 19000101) AS unknown_reported_dates,
        COUNTIF(crash_time_key     = -1)       AS unknown_times,
@@ -1080,30 +1385,21 @@ SELECT COUNTIF(crash_date_key     = 19000101) AS unknown_crash_dates,
        COUNTIF(person_profile_key = -1)       AS unknown_person_profiles
 FROM crashes.fact_crash_person;
 
--- Duplicate natural keys in a dimension = broken MERGE logic.
-SELECT 'dim_location' AS dim, location_nk AS nk, COUNT(*) AS n
-FROM crashes.dim_location GROUP BY location_nk HAVING COUNT(*) > 1
-UNION ALL
-SELECT 'dim_conditions', conditions_nk, COUNT(*)
-FROM crashes.dim_conditions GROUP BY conditions_nk HAVING COUNT(*) > 1
-UNION ALL
-SELECT 'dim_crash_type', crash_type_nk, COUNT(*)
-FROM crashes.dim_crash_type GROUP BY crash_type_nk HAVING COUNT(*) > 1
-UNION ALL
-SELECT 'dim_person_profile', person_profile_nk, COUNT(*)
-FROM crashes.dim_person_profile GROUP BY person_profile_nk HAVING COUNT(*) > 1;
-
--- Grain check. fact_rows must equal distinct_socrata_ids (else double-load).
--- A republish's regenerated ids would pass this check, which is why
--- Section 5 also asserts each staged crash's row count before committing.
--- persons_per_crash should sit near 1.96 — near 1.0 means staging was
--- deduped on instanceid upstream.
+-- Grain. persons_per_crash should sit near 1.96: near 1.0 means staging was
+-- deduped on instanceid upstream. multi_date_crashes counts crashes whose
+-- person rows carry different crash dates (0 so far): deltas defer them to
+-- full loads (Section 5) and the ML panel places them by their latest date.
+-- repeated_socrata_ids should be 0, though :id alone proves little here,
+-- since each republish regenerates it.
 SELECT
   (SELECT COUNT(*) FROM crashes.stg_crash_person)  AS staged,
   COUNT(*)                                         AS fact_rows,
-  COUNT(DISTINCT socrata_id)                       AS distinct_socrata_ids,
   COUNT(DISTINCT instanceid)                       AS distinct_crashes,
-  ROUND(SAFE_DIVIDE(COUNT(*), COUNT(DISTINCT instanceid)), 3) AS persons_per_crash
+  ROUND(SAFE_DIVIDE(COUNT(*), COUNT(DISTINCT instanceid)), 3) AS persons_per_crash,
+  (SELECT COUNT(*) FROM (
+     SELECT instanceid FROM crashes.fact_crash_person
+     GROUP BY instanceid HAVING COUNT(DISTINCT crash_date) > 1))  AS multi_date_crashes,
+  COUNT(*) - COUNT(DISTINCT socrata_id)            AS repeated_socrata_ids
 FROM crashes.fact_crash_person;
 
 -- Source data quality. Expected to be nonzero — these measure the feed,
@@ -1173,24 +1469,79 @@ FROM crashes.dim_date;
 
 
 -- ============================================================
--- SECTION 8: RETIRED — delete reconciliation now runs inside Section 5's
+-- SECTION 8: RETIRED — delete reconciliation belongs inside Section 5's
 -- transaction, so a load can't leave replaced crashes without their
--- matching deletes (or the reverse). Kept so section numbers stay stable.
+-- matching deletes (or the reverse). The number is kept, and left empty, so
+-- the remaining section numbers don't shift.
 -- ============================================================
 
 
 -- ============================================================
--- SECTION 9: ETL LOAD LOG (every load, last)
--- Parameters come from Run_Pipeline.py; the counts are the ones Section 5's
--- final SELECT returns. fact_updated stays NULL: rows are replaced, never
--- updated.
+-- SECTION 9: ETL LOAD LOG — SUCCESS (every load, last; parameter @load_id)
+-- Section 5 inserted this load's row inside the fact transaction. It's
+-- marked succeeded only here, after the ML panel is published, so
+-- status = 'succeeded' means the fact AND the panel are current: that is
+-- what a freshness alert should watch.
 -- ============================================================
 
-INSERT INTO crashes.etl_load_log
-  (load_id, load_mode, window_start, started_at, finished_at,
-   rows_staged, fact_inserted, fact_updated, fact_deleted, socrata_updated_at,
-   crashes_new, crashes_changed, crashes_removed)
-SELECT GENERATE_UUID(), @load_mode, @window_start, @started_at, CURRENT_TIMESTAMP(),
-       @rows_staged, @fact_inserted, NULL, @fact_deleted,
-       (SELECT MAX(socrata_updated_at) FROM crashes.stg_crash_person),
-       @crashes_new, @crashes_changed, @crashes_removed;
+UPDATE crashes.etl_load_log
+SET status = 'succeeded', finished_at = CURRENT_TIMESTAMP()
+WHERE load_id = @load_id AND status = 'fact_committed';
+
+
+-- ============================================================
+-- SECTION 10: ETL LEASE (--setup, before anything else; safe to rerun)
+-- One row naming the run allowed to write. Run_Pipeline.py takes it with a
+-- conditional UPDATE before its first write and updates its heartbeat before
+-- each write job, recording that job's id. Concurrent UPDATEs of one row conflict in
+-- BigQuery, and the one retried re-reads the row, so only one run can hold
+-- it. Ownership never expires: a paused process might still submit its reserved
+-- job. Recovery requires stopping that owner process and checking its jobs first.
+-- ============================================================
+
+-- Creation and singleton seeding are one atomic statement. Separate concurrent
+-- INSERT-if-not-exists statements can both insert and break the singleton.
+CREATE TABLE IF NOT EXISTS crashes.etl_lease AS
+SELECT 'pipeline' AS lease_name, CAST(NULL AS STRING) AS holder,
+       CAST(NULL AS TIMESTAMP) AS acquired_at, CAST(NULL AS TIMESTAMP) AS heartbeat_at,
+       CAST(NULL AS STRING) AS current_job_id;
+
+-- Additive upgrade for development tables created by the earlier expiring lease.
+-- Any legacy expires_at column is ignored; timestamps never authorize takeover.
+-- Guarded by INFORMATION_SCHEMA rather than left as a bare ADD COLUMN IF NOT
+-- EXISTS: the ALTER counts against the per-table metadata update limit even
+-- when the column is already there, and a few --setup runs in a row then fail
+-- with 'too many table update operations for this table'.
+IF NOT EXISTS (
+  SELECT 1 FROM crashes.INFORMATION_SCHEMA.COLUMNS
+  WHERE table_name = 'etl_lease' AND column_name = 'heartbeat_at'
+) THEN
+  ALTER TABLE crashes.etl_lease ADD COLUMN heartbeat_at TIMESTAMP;
+END IF;
+ASSERT (SELECT COUNT(*) FROM crashes.etl_lease) = 1
+   AND (SELECT COUNTIF(lease_name = 'pipeline') FROM crashes.etl_lease) = 1
+  AS 'etl_lease must contain exactly one pipeline row; inspect before recovery';
+
+
+-- ============================================================
+-- SECTION 11: ETL LOAD LOG — FAILURE (only when a load fails; best effort)
+-- Marks this load's row failed and keeps its fact_committed_at, so the log
+-- still shows whether the fact had changed. Inserts a failed row instead if
+-- the load died before Section 5 committed. Parameters: @load_id,
+-- @load_mode, @window_start, @started_at, @error_message.
+-- ============================================================
+
+MERGE crashes.etl_load_log AS t
+USING (SELECT @load_id AS load_id) AS s
+ON t.load_id = s.load_id
+-- Never downgrade a load Section 9 already marked succeeded: if that UPDATE
+-- committed and only its response was lost, the load did finish. A matched row
+-- failing this condition is skipped, not routed to NOT MATCHED, so no second
+-- row appears; the process still exits non-zero.
+WHEN MATCHED AND t.status IS DISTINCT FROM 'succeeded' THEN
+  UPDATE SET status = 'failed', error_message = @error_message,
+             finished_at = CURRENT_TIMESTAMP()
+WHEN NOT MATCHED THEN
+  INSERT (load_id, load_mode, window_start, started_at, finished_at, status, error_message)
+  VALUES (@load_id, @load_mode, @window_start, @started_at, CURRENT_TIMESTAMP(),
+          'failed', @error_message);
