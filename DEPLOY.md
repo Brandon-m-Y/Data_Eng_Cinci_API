@@ -26,8 +26,19 @@ an oversight — the pipeline has only ever reached BigQuery through the Python
 client and a service-account key, so `gcloud` and `bq` were never needed until
 this runbook. Both are needed now.
 
+**Use PowerShell, not Git Bash.** Two reasons, both found the hard way on
+2026-10-02. `bq` fails under Git Bash on this install with
+`ERROR: (bq) python3.13: command not found`, because the `.cmd` wrapper's
+interpreter lookup does not survive MSYS2's path translation; the same
+command works untouched in PowerShell. And the variables below are PowerShell
+syntax, which bash will not parse. (If you ever do need `bq` from Git Bash,
+`export CLOUDSDK_PYTHON=".../google-cloud-sdk/platform/bundledpython/python.exe"`
+fixes it.)
+
 **1. Install the Cloud SDK** (this is what provides `gcloud` and `bq`), then
-open a *new* terminal so the PATH refreshes:
+open a *new* PowerShell window so the PATH refreshes. The installer updates
+the persisted user PATH, but a shell that was already open keeps the old one —
+that is why `gcloud` reports "command not found" right after installing:
 
 ```powershell
 winget install --id Google.CloudSDK --exact
