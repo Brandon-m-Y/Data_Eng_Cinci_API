@@ -178,7 +178,7 @@ constraints. `requirements-dev.txt` adds the notebook packages on top.
 | `GCP_PROJECT_ID` | Required. BigQuery project |
 | `GCP_DATASET` | Optional, default `crashes`. Moves every table the pipeline reads or writes: the SQL files say `crashes.` and the runner substitutes this name, so a scratch dataset is fully isolated. |
 | `GCP_LOCATION` | Optional, default `us-east1` |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Path to the service-account key JSON. Leave unset on Cloud Run, where the job's service account is used instead. |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Optional, and now normally unset. Path to a service-account key JSON. Unset, `get_client()` uses application-default credentials — yours locally, the job's attached service account on Cloud Run. It must point at a *service-account* key if set at all; an ADC user file is a different format and will not load. |
 | `SQL_FILE` | Optional, default `Star_Schema_ETL.sql` |
 | `PANEL_SQL_FILE` | Optional, default `ML_Crash_Panel.sql` |
 | `DELTA_LOOKBACK_DAYS` | Optional, default `90` |
@@ -334,16 +334,20 @@ The image is based on `python:3.13-slim`, pinned by digest. It installs
 defaults to `--delta`. Pass other flags as arguments. `.dockerignore` keeps
 `.env` and the key JSON out of the image.
 
-To test locally, mount the key and point the variable at the mounted path,
-which overrides the Windows path in `.env`:
+To test locally, mount your application-default credentials where the
+container's user will find them. The image runs as `etl`, so that is
+`/home/etl/.config/gcloud`:
 
 ```powershell
 docker build -t cinci-crash-etl .
 docker run --rm --env-file .env `
-  -v "${PWD}\cincinnati-open-crash-data-<id>.json:/secrets/key.json:ro" `
-  -e GOOGLE_APPLICATION_CREDENTIALS=/secrets/key.json `
+  -v "$env:APPDATA\gcloud:/home/etl/.config/gcloud:ro" `
   cinci-crash-etl --delta
 ```
+
+Before the key was retired this mounted the key JSON and set
+`GOOGLE_APPLICATION_CREDENTIALS=/secrets/key.json` instead. Either works; the
+difference is that nothing long-lived now sits on disk.
 
 On Windows, Docker Desktop needs WSL 2. If its engine won't start, run
 `wsl --install --no-distribution` in an administrator PowerShell and restart.
@@ -878,10 +882,11 @@ feed:
 - **The panel changes with every load.** For a reproducible training run,
   copy it first, e.g.
   `CREATE TABLE crashes.ml_crash_panel_20260910 COPY crashes.ml_crash_panel`.
-- **The service-account key sits in this OneDrive-synced folder.** It's
-  git-ignored and excluded from the Docker image, but consider moving it out
-  and updating `GOOGLE_APPLICATION_CREDENTIALS`. Once the job runs on Cloud
-  Run, the key is only needed for local runs.
+- **There is no service-account key any more.** One used to sit in this
+  OneDrive-synced folder; DEPLOY.md step 11 retired it, and local runs use
+  your own application-default credentials. If `gcloud auth
+  application-default login` has expired, a local run fails at
+  `DefaultCredentialsError` rather than anything pipeline-shaped.
 - **`APP_ENV` and `GOOGLE_CLOUD_RUN_REGION_ENDPOINT` in `.env`** aren't read
   by any code.
 - **Testing.** Run `python -m unittest discover -s tests` after any change.

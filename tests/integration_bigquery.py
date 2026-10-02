@@ -7,7 +7,7 @@ read (CLONE). Needs credentials and network, so it is not part of the
 offline suite:
 
   docker run --rm --env-file .env -v "${PWD}:/app:ro" -w /app \
-    -v "<key>.json:/secrets/key.json:ro" -e GOOGLE_APPLICATION_CREDENTIALS=/secrets/key.json \
+    -v "$env:APPDATA\gcloud:/home/etl/.config/gcloud:ro" \
     --entrypoint python cinci-crash-etl tests/integration_bigquery.py
 
 Takes about 30 minutes and runs 56 checks: most of the time is the five

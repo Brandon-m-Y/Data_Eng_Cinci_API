@@ -465,39 +465,120 @@ Two triggers fit Cloud Scheduler's free tier of three.
 
 ## Step 10 — Fast failure alert (recommended)
 
-Watchdog guard 2 already catches a crashed job, but it can take up to 36
-hours. This makes it minutes.
+Watchdog guard 2 already catches a crashed job, but only at 14:00 UTC, so up
+to a day later. This makes it minutes.
 
-Monitoring → Alerting → **Create policy** → metric
-`run.googleapis.com/job/completed_execution_count` on resource **Cloud Run
-Job** → filter `result = failed` → condition: *any time series is above 0*
-over a 5-minute window → add an email notification channel → name it
-`crash-etl job failed` → Save.
+The policy lives in [deploy/alert_job_failed.json](deploy/alert_job_failed.json)
+so it is reviewable and reproducible rather than hand-clicked. It watches
+`run.googleapis.com/job/completed_execution_count` with `result = failed`,
+summed over five minutes across both jobs. That metric counts **executions**,
+not task attempts: with `--max-retries=1` a run that fails once and succeeds
+on the retry does not alert, which is what you want.
+
+The notification channel has to exist first, because the policy refers to it
+by id. `gcloud alpha monitoring` is not installed by default:
+
+```powershell
+gcloud components install alpha --quiet
+```
+
+```powershell
+$CHANNEL = (gcloud alpha monitoring channels create --display-name="crash-etl alerts" --type=email --channel-labels=email_address=brandonmichealytuarte@gmail.com --format="value(name)")
+```
+
+```powershell
+$CHANNEL
+```
+
+That must print `projects/.../notificationChannels/<digits>`. If it is empty
+the create failed and the next command would install a policy that alerts
+nobody — the same trap as a service-account-owned watchdog. Then:
+
+```powershell
+(Get-Content deploy\alert_job_failed.json -Raw).Replace('CHANNEL_PLACEHOLDER', $CHANNEL) | Set-Content "$env:TEMP\alert.json" -Encoding utf8
+```
+
+```powershell
+gcloud alpha monitoring policies create --policy-from-file="$env:TEMP\alert.json"
+```
+
+```powershell
+Remove-Item "$env:TEMP\alert.json"
+```
+
+**Verify:**
+
+```powershell
+gcloud alpha monitoring policies list --format="table(displayName,enabled,notificationChannels)"
+```
+
+One policy, enabled, with your channel attached. Google also sends a
+confirmation mail when the channel is created; receiving it proves delivery,
+which is the part worth checking.
+
+The console does the same thing: Monitoring → Alerting → **Create policy** →
+metric `run.googleapis.com/job/completed_execution_count` on resource **Cloud
+Run Job** → filter `result = failed` → *any time series is above 0* over five
+minutes → email channel → name it `crash-etl job failed`.
 
 ---
 
 ## Step 11 — Retire the local key
 
 Once the cloud runs the pipeline, the long-lived JSON key on your laptop is
-the weakest thing left. It is already gitignored and has never been committed,
-but a key that does not exist cannot leak.
+the weakest thing left. It is gitignored and has never been committed, but a
+key that does not exist cannot leak. It belongs to `cinci-crash-etl`, the
+original development account — nothing in the cloud uses it any more:
+Cloud Run runs as `crash-etl-runtime`, Cloud Scheduler as
+`crash-etl-scheduler`, and the watchdog as you.
+
+Local runs switch to your own application-default credentials, which you
+already hold as project owner:
 
 ```powershell
 gcloud auth application-default login
 ```
 
-Delete the `GOOGLE_APPLICATION_CREDENTIALS` line from `.env`, then re-run the
-offline suite and one integration run to confirm ADC works. Only then:
+Delete the `GOOGLE_APPLICATION_CREDENTIALS` line from `.env`. `get_client()`
+falls back to ADC when that variable is unset — the same branch Cloud Run
+takes — so nothing else changes. Confirm before deleting anything:
 
 ```powershell
-$KEY_SA = "<the account the local key belongs to>"
-gcloud iam service-accounts keys list --iam-account=$KEY_SA
+python -m unittest discover -s tests
+```
+
+```powershell
+python -c "from Load_to_GBQ import get_client; print(next(iter(get_client().query('SELECT COUNT(*) AS n FROM crashes.fact_crash_person').result())).n)"
+```
+
+A row count means ADC can reach BigQuery. The integration suite is the
+stronger proof if you want it, but it takes ~30 minutes; the read above is
+enough to show the credential path works. Only then destroy the key:
+
+```powershell
+$KEY_SA = "cinci-crash-etl@cincinnati-open-crash-data.iam.gserviceaccount.com"
+```
+
+```powershell
+gcloud iam service-accounts keys list --iam-account=$KEY_SA --managed-by=user
+```
+
+```powershell
 gcloud iam service-accounts keys delete <KEY_ID> --iam-account=$KEY_SA
+```
+
+```powershell
 Remove-Item .\cincinnati-open-crash-data-*.json
 ```
 
-**Verify:** `gcloud iam service-accounts keys list --iam-account=$KEY_SA`
-shows only Google-managed keys, and the tests still pass.
+**Verify:** the same `keys list` returns nothing under `--managed-by=user`,
+and the tests still pass. The deletion is final — a deleted key cannot be
+re-downloaded, only replaced with a new one.
+
+Optional, once a week has passed without surprises: the `cinci-crash-etl`
+account itself is now unused and still holds `bigquery.dataEditor` and
+`bigquery.jobUser`. `gcloud iam service-accounts disable $KEY_SA` is the
+reversible way to find out whether anything still depends on it.
 
 ---
 
@@ -558,6 +639,14 @@ Setting the three variables below is what switches deploying on.
 Identity Federation lets GitHub mint short-lived tokens instead, with no
 stored secret.
 
+Three APIs that step 1 did not need. Pools live in `iam`, and the token
+exchange GitHub performs goes through `sts` and `iamcredentials`; without
+them the pool create fails and the workflow would fail later at auth:
+
+```powershell
+gcloud services enable iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com
+```
+
 ```powershell
 $PROJECT_NUMBER = (gcloud projects describe $PROJECT --format="value(projectNumber)")
 $DEPLOYER_SA = "crash-etl-deployer@$PROJECT.iam.gserviceaccount.com"
@@ -577,13 +666,51 @@ The `--attribute-condition` is the part that matters. Without it, any
 repository on GitHub can request a token for your service account.
 
 Then add these repository variables (Settings → Secrets and variables →
-Actions → Variables — they are not secrets):
+Actions → Variables — they are not secrets). The project number is
+`587034074579`:
 
 | Variable | Value |
 |---|---|
 | `GCP_PROJECT_ID` | `cincinnati-open-crash-data` |
-| `GCP_WIF_PROVIDER` | `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/github/providers/github` |
+| `GCP_WIF_PROVIDER` | `projects/587034074579/locations/global/workloadIdentityPools/github/providers/github` |
 | `GCP_DEPLOYER_SA` | `crash-etl-deployer@cincinnati-open-crash-data.iam.gserviceaccount.com` |
+
+Or with the GitHub CLI, which avoids three chances to mistype:
+
+```powershell
+gh variable set GCP_PROJECT_ID --body "cincinnati-open-crash-data"
+```
+
+```powershell
+gh variable set GCP_WIF_PROVIDER --body "projects/587034074579/locations/global/workloadIdentityPools/github/providers/github"
+```
+
+```powershell
+gh variable set GCP_DEPLOYER_SA --body "crash-etl-deployer@cincinnati-open-crash-data.iam.gserviceaccount.com"
+```
+
+**Setting `GCP_WIF_PROVIDER` is the switch.** From that moment any push to
+`main` touching a non-`.md` file rebuilds the image and repoints both jobs,
+gated only by the 51-test offline suite — the integration suite does not run
+in CI. Prove the path once by hand before relying on it:
+
+```powershell
+gh workflow run "Build and deploy"
+```
+
+```powershell
+gh run watch
+```
+
+**Verify:** both jobs now point at the digest the run built, and it is a new
+one:
+
+```powershell
+gcloud run jobs describe crash-etl-delta --region=$REGION --format="value(spec.template.spec.template.spec.containers[0].image)"
+```
+
+Record that digest. The rollback section above is how you go back to the
+previous one if the next scheduled run misbehaves.
 
 ---
 
