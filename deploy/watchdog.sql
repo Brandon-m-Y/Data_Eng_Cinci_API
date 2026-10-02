@@ -1,6 +1,12 @@
 -- Health watchdog for the crash ETL.
 --
--- Runs hourly as a BigQuery scheduled query with failure email enabled.
+-- Runs once a day as a BigQuery scheduled query with failure email enabled,
+-- at 14:00 UTC -- a few hours after the 06:00 America/New_York load, so it
+-- checks the load that just ran rather than polling the clock. Daily suits a
+-- daily pipeline: the load is the only thing that takes the writer lease, so
+-- checking shortly after it catches a stuck lease within hours, and a
+-- persistent fault mails once a day instead of twenty-four times.
+--
 -- A healthy check returns one row and succeeds. Any tripped guard RAISEs,
 -- which marks the scheduled-query run failed, which sends the mail. The
 -- alert *is* the failure: there is no state to keep and nothing to clean up.
@@ -36,13 +42,19 @@ SET problems = ARRAY(
     UNION ALL
 
     -- 2. Loads stopped. A delta runs Mon-Sat and a full on Sun, so a healthy
-    -- pipeline writes a 'succeeded' row every day. 36 hours leaves room for
-    -- one missed run plus its retry. This also covers a crashed Cloud Run
-    -- job, just more slowly than the Monitoring policy in DEPLOY.md step 10.
+    -- pipeline writes a 'succeeded' row every day.
+    --
+    -- 24 hours, not 36, because this runs once a day a few hours AFTER the
+    -- load rather than continuously. The arithmetic, in UTC: the load starts
+    -- 10:00 and succeeds about 10:05; this check runs 14:00. Normally the
+    -- newest success is ~4 hours old, far under the threshold. If today's
+    -- load failed, the newest is yesterday's at ~28 hours, over it. So a
+    -- single failed load is caught the same morning. At 36 hours it would
+    -- not be caught until the following day.
     --
     -- Silent if the log has never recorded a success: MAX() is NULL and the
     -- HAVING drops the row. That is deliberate, so a half-built project
-    -- doesn't mail hourly, and it stops mattering after the first green run.
+    -- doesn't mail daily, and it stops mattering after the first green run.
     SELECT FORMAT(
       'NO RECENT LOAD: newest succeeded load finished %t, %d hours ago. '
       || 'Check Cloud Run job executions for crash-etl-delta / crash-etl-full.',
@@ -50,7 +62,7 @@ SET problems = ARRAY(
       TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), MAX(finished_at), HOUR))
     FROM crashes.etl_load_log
     WHERE status = 'succeeded'
-    HAVING MAX(finished_at) < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 36 HOUR)
+    HAVING MAX(finished_at) < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
 
     UNION ALL
 

@@ -299,7 +299,7 @@ Planned job settings:
 - **Environment:** `GCP_PROJECT_ID` (required) and `SOCRATA_APP_TOKEN` from
   Secret Manager. `GCP_DATASET` and `GCP_LOCATION` default to `crashes` and
   `us-east1`.
-- **Alerts.** Three of the four are one hourly BigQuery scheduled query,
+- **Alerts.** Four of the five are one daily BigQuery scheduled query,
   [deploy/watchdog.sql](deploy/watchdog.sql). A tripped guard raises, the
   failed run sends the mail, and there is no extra state to keep: the failure
   *is* the alert.
@@ -307,9 +307,12 @@ Planned job settings:
     An abandoned owner blocks every later load until recovery; see
     [Operational notes](#operational-notes). Nothing else will ever report it,
     because ownership deliberately never expires.
-  - No `etl_load_log` row with `status = 'succeeded'` in 36 hours. A delta
+  - No `etl_load_log` row with `status = 'succeeded'` in 24 hours. A delta
     runs six days a week and a full load on the seventh, so a healthy pipeline
-    records a success every day; 36 hours allows one miss plus its retry.
+    records a success every day. The check runs a few hours after the load, so
+    the newest success is normally ~4 hours old and a single failed load puts
+    it at ~28 — caught the same morning. A 36-hour threshold would miss it
+    until the next day.
   - `socrata_updated_at` unchanged for 21 days, which means the city stopped
     publishing. Deltas keep succeeding against an unchanged publication, so
     the other guards stay quiet while the data ages. The publishes seen so far

@@ -30,7 +30,11 @@ from google.cloud import bigquery_datatransfer
 from google.protobuf import field_mask_pb2
 
 DISPLAY_NAME = 'crash-etl watchdog'
-SCHEDULE = 'every 1 hours'
+# App Engine cron syntax, interpreted in UTC. 14:00 UTC is 09:00 EST /
+# 10:00 EDT, so it always lands a few hours after the 06:00 America/
+# New_York load, in either half of the year. Guard 2's 24-hour
+# threshold in watchdog.sql depends on that ordering.
+SCHEDULE = 'every day 14:00'
 SQL_PATH = Path(__file__).with_name('watchdog.sql')
 REPO_ROOT = Path(__file__).resolve().parent.parent
 

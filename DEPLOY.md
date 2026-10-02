@@ -286,14 +286,17 @@ consequence is that a stuck lock blocks every later load **forever** and
 nothing in the system will mention it. Unattended scheduling without this
 alert turns a silent stall into weeks of stale data.
 
-[deploy/watchdog.sql](deploy/watchdog.sql) checks four things hourly and
-raises an error if any trips. A failed scheduled query sends mail, so the
+[deploy/watchdog.sql](deploy/watchdog.sql) checks four things once a day and
+raises an error if any trips. It runs at 14:00 UTC — 09:00 EST / 10:00 EDT —
+a few hours after the 06:00 load, so it checks the load that just ran rather
+than polling the clock. Daily suits a daily pipeline, and a persistent fault
+mails once a day instead of twenty-four times. A failed scheduled query sends mail, so the
 failure *is* the alert — there is no extra state to keep.
 
 | Guard | Trips when | Catches |
 |---|---|---|
 | Stuck lock | `etl_lease` held over 2 hours | An owner that died with an unresolved job |
-| No recent load | No `succeeded` row in 36 hours | Crashed job, bad deploy, revoked permission |
+| No recent load | No `succeeded` row in 24 hours | Crashed job, bad deploy, revoked permission |
 | Stale feed | `socrata_updated_at` unchanged 21 days | The city stopped publishing |
 | Data not advancing | Newest `crash_date` over 60 days old | The feed republishes but adds no crash days |
 
@@ -442,7 +445,7 @@ full load.
 |---|---|---|
 | Cloud Run | ~26 deltas (90 s, 1 vCPU, 1 GiB) + ~4.3 full loads (155 s, 2 vCPU, 4 GiB) ≈ 3,700 vCPU-s, 5,000 GiB-s | Inside the always-free tier (180,000 vCPU-s, 360,000 GiB-s) |
 | Cloud Scheduler | 2 triggers | Free tier is 3 |
-| BigQuery watchdog | ~720 hourly queries against two tiny tables, 10 MB minimum billing each ≈ 7 GB scanned | Inside the 1 TB free tier |
+| BigQuery watchdog | ~30 daily queries scanning 3.5 MB each, 10 MB minimum billing ≈ 0.3 GB | Inside the 1 TB free tier |
 | Artifact Registry | ~0.5 GB of images | ~$0.05 |
 | Secret Manager | 1 secret, few accesses | ~$0.06 |
 
