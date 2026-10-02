@@ -126,6 +126,9 @@ def main():
         print('Rerun with --update to push a changed watchdog.sql.')
         return
 
+    if existing is None and not args.recreate:
+        print('No watchdog is installed in this project right now.')
+
     # Only creating or updating needs to decide who runs it.
     if not service_account and not args.as_me:
         sys.exit('Pass --service-account, or set WATCHDOG_SERVICE_ACCOUNT. Running the '
