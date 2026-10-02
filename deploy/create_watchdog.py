@@ -1,4 +1,4 @@
-"""Create or update the hourly health watchdog as a BigQuery scheduled query.
+"""Create or update the daily health watchdog as a BigQuery scheduled query.
 
 DEPLOY.md step 8. The BigQuery console does the same thing in a few clicks;
 this exists so the alert is reproducible and reviewable instead of hand-built,
@@ -41,7 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # --test-alert installs this instead of the real watchdog. It always fails,
 # which is the only way to find out whether the failure email reaches a
 # person. Forgetting to restore the real one is loud rather than silent --
-# an hourly mail you cannot miss -- which is the right way round for a
+# a daily mail you cannot miss -- which is the right way round for a
 # safeguard to fail.
 TEST_SQL = """-- TEMPORARY. Installed by: create_watchdog.py --test-alert
 -- Restore the real watchdog with:
@@ -68,7 +68,7 @@ def main():
                              'email arrives, then rerun with --update to restore')
     parser.add_argument('--run-now', action='store_true',
                         help='also trigger a run immediately instead of waiting for '
-                             'the next hourly one')
+                             'the next scheduled one')
     args = parser.parse_args()
 
     # dotenv_values, not load_dotenv: .env sets GOOGLE_APPLICATION_CREDENTIALS

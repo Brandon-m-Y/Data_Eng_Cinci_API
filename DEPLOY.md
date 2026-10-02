@@ -354,7 +354,7 @@ mail arrives, the notification is not reaching you — restore the real
 watchdog first, then reinstall it with `--as-me`, which ties the alert to
 your own account at the cost of depending on your credentials.
 
-Forgetting to restore fails loudly rather than silently: you get an hourly
+Forgetting to restore fails loudly rather than silently: you get a daily
 mail you cannot miss. That is the right way round for a safeguard, but fix it
 the same day — a watchdog crying wolf is one you will start ignoring, and
 then it protects nothing.

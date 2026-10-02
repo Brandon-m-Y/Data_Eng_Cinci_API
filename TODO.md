@@ -77,9 +77,10 @@ nothing and bounds how far a missed delta can drift.
 
 Written and validated, not yet installed:
 
-- `deploy/watchdog.sql` — hourly health check. Validated against production on
-  2026-10-02: the healthy path returns `ok`, and all three guards were made to
-  fire against simulated data, so the messages are known to be correct.
+- `deploy/watchdog.sql` — daily health check, 14:00 UTC, a few hours after
+  the load. Validated against production on 2026-10-02: the healthy path
+  returns `ok`, and all four guards were made to fire against simulated data,
+  so the messages are known to be correct.
 - `deploy/create_watchdog.py` — installs it as a scheduled query.
 - `.github/workflows/deploy.yml` — build and deploy on push to `main`. Gated
   on the offline suite. Needs Workload Identity Federation (DEPLOY.md Appendix

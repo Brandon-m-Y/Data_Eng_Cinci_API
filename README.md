@@ -324,7 +324,7 @@ Planned job settings:
     at 2026-08-24, a 39-day publication lag. Measuring the stamp is not
     measuring the data.
   - Job execution failures, as a Cloud Monitoring policy. Redundant with the
-    36-hour guard, but minutes instead of hours.
+    24-hour guard, but minutes instead of a day.
 
 ### Docker
 
@@ -833,7 +833,7 @@ feed:
 
   Then finish the recovered load's audit row. A run whose outcome was never
   resolved deliberately wrote nothing to `etl_load_log`, so its row can sit at
-  `fact_committed` forever and keep the 36-hour alert quiet about a pipeline
+  `fact_committed` forever and keep the no-recent-load alert quiet about a pipeline
   that is not actually current. Run `--delta` first: it rebuilds the panel and,
   if that owner's fact work had committed, changes no fact rows. Then close the
   old row by hand:
