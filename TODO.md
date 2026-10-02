@@ -6,23 +6,48 @@ lives in README.md under "Design decisions"; the audits are in AUDIT.md.
 Production is on the current schema as of 2026-10-01; nothing is pending
 there.
 
-## Watch before scheduling anything unattended
+## Watch
 
 - **Crash churn against the deletion cap.** Each publish re-keys a handful of
   `instanceid`s, which a load sees as that many removed and as many added:
-  20/20 across the 09-10 → 09-19 publishes, 25/25 across 09-19 → 10-01. The
-  cap is `max(100, 1% of the crashes the load could delete)`, so at the
-  current rate there is room, but an unattended job starts failing if it
-  grows. Check the trend in `etl_load_log.crashes_removed` before scheduling,
-  and decide whether the cap or the alerting should change.
+  20/20 across the 09-10 → 09-19 publishes, 25/25 across 09-19 → 10-01.
+
+  Measured 2026-10-02, so the headroom is now a number rather than a worry:
+
+  | Load | Deletion-eligible crashes | Cap |
+  |---|---:|---:|
+  | `--delta` (90-day window) | 3,319 | **100** — 1% is only 34, so the floor governs |
+  | `--full` | 221,289 | 2,213 |
+
+  A full load has 88× headroom over the observed 25. A delta is the tighter
+  case, and even if every re-key landed inside the 90-day window it would be
+  25 against 100. There is room to schedule. What's missing is a third data
+  point: the feed hadn't republished as of 2026-10-02, so the next one, due
+  around 2026-10-10 on the 9–12 day cadence, is the one to look at. Check
+  `etl_load_log.crashes_removed` then, and revisit the cap if the trend bends
+  upward.
 
 ## ML
 
+- **Re-derive the feature lag — the `t−13` figure in the old plan is wrong.**
+  Measured 2026-10-02 against the 2026-10-01 publish: the newest crash in the
+  data is 2026-08-24, and daily volume runs at full strength (25–50 crashes)
+  through 08-23 and then stops dead. That is a **publication lag of about 38
+  days**, a cliff rather than a trickle.
+
+  The old estimate added a ~9-day publish cadence to a 3.7-day p99 *reporting*
+  lag (crash date → reported date, which is internal to a publication) and got
+  13. Those are different quantities, and the binding one is the publication
+  lag. Lag the features to roughly **t−40** unless the next publish says
+  otherwise — confirm by re-measuring `MAX(crash_date)` against
+  `socrata_updated_at` once it lands.
+
+  This makes the forecasting problem harder, not just different: predicting
+  the next 7 days from crash data that ends 40 days ago leans much more on
+  weather and on the static cell attributes.
 - Complete the crash-likelihood model. The panel and its `crashes_next_7`
   label are built; what remains is in the training code, not the panel:
-  - Lag the features to the **forecast issue time**. The panel is event-time
-    by design. The feed's ~9-day publish cadence plus the 3.7-day p99
-    reporting lag puts the freshest trustworthy crash day around t−13.
+  - Lag the features to the forecast issue time, per the measurement above.
   - Use **forecast** weather for the target week, not the observed weather
     the panel carries.
 - Load the external feature tables, which are created but empty:
@@ -34,43 +59,43 @@ there.
 
 ## Deployment
 
-Plan: a Cloud Run Job triggered by Cloud Scheduler; GitHub Actions only
-builds and deploys.
+**[DEPLOY.md](DEPLOY.md) has the procedure** — every command in order, each
+with a verification. README.md § Deployment has the design. This list is only
+what is still undone and what DEPLOY.md does not decide for you.
 
-- Decide the periodic `--full` cadence: weekly (recommended, ~2.5 min per
-  run) or monthly.
-- Deploy two Cloud Run Jobs from the same image, both in `us-east1`, 1
-  automatic retry, runtime service account:
-  - `crash-etl-delta`: `--args=--delta`, 1Gi memory, 30m timeout (a delta
-    peaked at 183 MB)
-  - `crash-etl-full`: `--args=--full`, 4Gi memory, 1h timeout (a full load
-    peaked at 1.76 GB)
-  - Writer ownership never expires. A clean failure releases the lock, so the
-    retry is a real second attempt; a killed run or an unknown job outcome
-    keeps it, and the retry fails within seconds until owner-specific
-    recovery. Follow README.md.
-  - Environment: `GCP_PROJECT_ID=cincinnati-open-crash-data` (required);
-    `SOCRATA_APP_TOKEN` from Secret Manager. `GCP_DATASET` and `GCP_LOCATION`
-    default to `crashes` / `us-east1`.
-- Create two Cloud Scheduler triggers (time zone America/New_York), skipping
-  the delta on full-load days so they never overlap:
-  - Weekly: delta `0 6 * * 1-6`, full `0 6 * * 0`
-  - Monthly: delta `0 6 2-31 * *`, full `0 6 1 * *`
-- Scheduler calls `POST https://run.googleapis.com/v2/projects/cincinnati-open-crash-data/locations/us-east1/jobs/<job>:run`
-  using a scheduler service account with Cloud Run Invoker.
-- Alternative if one job is preferred: a single job defaulting to `--delta`,
-  with the full trigger sending
-  `{"overrides":{"containerOverrides":[{"args":["--full"]}]}}`. Downsides:
-  both runs get full-load sizing, and the scheduler account needs
-  `run.jobs.runWithOverrides`, which Invoker doesn't include.
-- Two triggers fit Cloud Scheduler's free tier (3 jobs per billing account).
-- **Required before scheduling:** an alert when `etl_lease` is held for more
-  than 2 hours, pointing at the owner-specific recovery runbook.
-- Other alerts: failed job executions; no `etl_load_log` row with
-  `status = 'succeeded'` in 36 hours; `socrata_updated_at` unchanged for N
-  days (stale feed — pick N from the observed ~9-day publish cadence).
-- Once Cloud Run is live, delete the local service-account key and use
-  `gcloud auth application-default login` for local runs.
+Decided: `--delta` Monday–Saturday and `--full` Sunday, both 06:00
+America/New_York. A full load is ~2.5 minutes, so weekly costs essentially
+nothing and bounds how far a missed delta can drift.
+
+Written and validated, not yet installed:
+
+- `deploy/watchdog.sql` — hourly health check. Validated against production on
+  2026-10-02: the healthy path returns `ok`, and all three guards were made to
+  fire against simulated data, so the messages are known to be correct.
+- `deploy/create_watchdog.py` — installs it as a scheduled query.
+- `.github/workflows/deploy.yml` — build and deploy on push to `main`. Gated
+  on the offline suite. Needs Workload Identity Federation (DEPLOY.md Appendix
+  A) before it can run; until then it fails at the auth step and nothing else
+  is affected.
+
+Remaining, in order:
+
+- [ ] APIs, Artifact Registry, Secret Manager, service accounts (steps 1–4)
+- [ ] Build, push, create both Cloud Run Jobs, smoke-test the delta (steps 5–7)
+- [ ] **Install the watchdog — required before anything is scheduled** (step 8)
+- [ ] Cloud Scheduler triggers (step 9)
+- [ ] Cloud Monitoring policy for failed executions (step 10)
+- [ ] Retire the local service-account key for ADC (step 11)
+- [ ] Workload Identity Federation, then let the workflow deploy (Appendix A)
+
+Open questions DEPLOY.md does not answer:
+
+- Whether to prove the watchdog's **email actually arrives**. The guards are
+  tested; delivery to your inbox is not. DEPLOY.md step 8 has a safe way to
+  force one, and it is worth doing once — an alert nobody has ever received is
+  an assumption, not a safeguard.
+- Whether `bigquery.dataEditor` should stay project-level. Fine while this
+  project holds one dataset; Appendix B tightens it to `crashes` alone.
 
 ## Deferred
 

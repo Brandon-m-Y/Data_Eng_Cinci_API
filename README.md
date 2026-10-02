@@ -240,9 +240,14 @@ the `-- SECTION n:` marker lines, and substitutes `GCP_DATASET` for
 
 ## Deployment
 
-The goal is an unattended daily load on Google Cloud. The container is built
-and verified against production. The cloud resources are next (see
-[Status](#status)).
+The goal is an unattended load on Google Cloud: `--delta` Monday–Saturday and
+`--full` on Sunday, both at 06:00 America/New_York. The container is built and
+verified against production and the scaffolding is written; the cloud
+resources themselves have not been created yet (see [Status](#status)).
+
+**[DEPLOY.md](DEPLOY.md) is the step-by-step procedure** — every command, in
+order, each with something to verify before moving on. This section is the
+design behind it: what each piece is for and why it is shaped this way.
 
 ### Target architecture
 
@@ -255,8 +260,8 @@ and verified against production. The cloud resources are next (see
                             ▲   runs as the runtime service account
                             │   SOCRATA_APP_TOKEN from Secret Manager
  Cloud Scheduler ───────────┘
-   daily:     --delta
-   periodic:  --full
+   Mon-Sat:  --delta
+   Sunday:   --full
                             │
                             ▼
                   BigQuery dataset `crashes`
@@ -294,16 +299,23 @@ Planned job settings:
 - **Environment:** `GCP_PROJECT_ID` (required) and `SOCRATA_APP_TOKEN` from
   Secret Manager. `GCP_DATASET` and `GCP_LOCATION` default to `crashes` and
   `us-east1`.
-- **Alerts:**
-  - Job execution failures.
-  - No `etl_load_log` row with `status = 'succeeded'` in 36 hours.
-  - `socrata_updated_at` on the latest succeeded row not changing for N days,
-    which means the feed itself went stale. Deltas keep succeeding against an
-    unchanged feed. The two publishes seen so far were 9 days apart, so pick
-    N once the city's cadence is known.
+- **Alerts.** Three of the four are one hourly BigQuery scheduled query,
+  [deploy/watchdog.sql](deploy/watchdog.sql). A tripped guard raises, the
+  failed run sends the mail, and there is no extra state to keep: the failure
+  *is* the alert.
   - **Required before scheduling:** `etl_lease` held for more than 2 hours.
-    An abandoned owner blocks future loads until recovery; see
-    [Operational notes](#operational-notes).
+    An abandoned owner blocks every later load until recovery; see
+    [Operational notes](#operational-notes). Nothing else will ever report it,
+    because ownership deliberately never expires.
+  - No `etl_load_log` row with `status = 'succeeded'` in 36 hours. A delta
+    runs six days a week and a full load on the seventh, so a healthy pipeline
+    records a success every day; 36 hours allows one miss plus its retry.
+  - `socrata_updated_at` unchanged for 21 days, which means the feed itself
+    went stale. Deltas keep succeeding against an unchanged publication, so
+    the other guards stay quiet while the data ages. The publishes seen so far
+    were 9 and 12 days apart, making 21 days two missed publishes.
+  - Job execution failures, as a Cloud Monitoring policy. Redundant with the
+    36-hour guard, but minutes instead of hours.
 
 ### Docker
 
@@ -340,15 +352,22 @@ On Windows, Docker Desktop needs WSL 2. If its engine won't start, run
 - [x] Production migrated to the current schema (`--setup`, then
       `--full --reprocess`, 2026-10-01): `distance_to_cbd_m` populated and
       coordinates nulled in pairs
-- [ ] GCP setup script: enable APIs, Artifact Registry repo, both service
-      accounts, Secret Manager secret, Workload Identity Federation
-- [ ] Create the Cloud Run Job
-- [ ] GitHub Actions workflow: on push to `main`, build, push and update the
-      job; manual runs with a chosen mode through `workflow_dispatch`
-- [ ] Cloud Scheduler triggers: daily `--delta`, periodic `--full` (weekly or
-      monthly, still to decide)
-- [ ] Alerts: failed executions, no `succeeded` load in 36 hours, a stale
-      feed, and a long-held lease (see [Job sizing](#job-sizing))
+- [x] Full-load cadence decided: weekly, Sunday 06:00 America/New_York
+- [x] Deployment runbook written and the supporting files with it:
+      [DEPLOY.md](DEPLOY.md), [deploy/watchdog.sql](deploy/watchdog.sql),
+      `deploy/create_watchdog.py`, `.github/workflows/deploy.yml`
+- [x] Watchdog SQL validated against production: the healthy path returns
+      `ok`, and all three guards were made to fire against simulated data
+- [ ] Enable APIs, Artifact Registry repo, both service accounts, Secret
+      Manager secret ([DEPLOY.md](DEPLOY.md) steps 1–4)
+- [ ] Build, push and create the two Cloud Run Jobs (steps 5–7)
+- [ ] Install the watchdog scheduled query — **required before scheduling**
+      (step 8)
+- [ ] Cloud Scheduler triggers: `--delta` Mon–Sat, `--full` Sun (step 9)
+- [ ] Cloud Monitoring policy for failed executions (step 10)
+- [ ] Retire the local service-account key for ADC (step 11)
+- [ ] Workload Identity Federation, so the GitHub Actions workflow can run
+      (DEPLOY.md Appendix A); the workflow is written but not yet exercised
 
 ---
 
@@ -721,6 +740,10 @@ feed:
 | `tests/test_regressions.py` | Offline tests (no credentials or network): extraction checks, staging schema, config and rendering, label grammar, CLI rules. `python -m unittest discover -s tests` |
 | `tests/test_lock_safety.py` | Offline tests for the writer lock: acquisition, outcome tracking, and the takeover attempts that must fail. Same runner. |
 | `tests/integration_bigquery.py` | End-to-end test on a throwaway clone of the dataset: 56 checks, about 30 minutes, needs credentials. Run command in its docstring. |
+| `DEPLOY.md` | Step-by-step Cloud Run deployment: every command in order, each with a verification. The design behind it is in [Deployment](#deployment). |
+| `deploy/watchdog.sql` | Hourly health check run as a BigQuery scheduled query. Raises on a stuck lease, a stalled pipeline or a stale feed; the failed run is what sends the mail. |
+| `deploy/create_watchdog.py` | Installs or updates that scheduled query, running it as the runtime service account. |
+| `.github/workflows/deploy.yml` | On push to `main`: offline suite, then build, push and point both jobs at the new digest. Needs Workload Identity Federation; not yet exercised. |
 | `crash-panel-spec.md` | Spec for the ML panel and the modeling plan (written as a pandas plan; the panel is built in BigQuery instead). |
 | `AUDIT.md` | Two-model audits of the project (2026-09-19 and 2026-10-01) and what each one changed. |
 | `TODO.md` | Open tasks. |

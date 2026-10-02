@@ -1,0 +1,84 @@
+# Build the image and point both Cloud Run Jobs at it.
+#
+# This only replaces the manual build in DEPLOY.md step 5. It does not create
+# any infrastructure, and it never runs the pipeline -- Cloud Scheduler does
+# that. Setup for the Workload Identity Federation this depends on is in
+# DEPLOY.md Appendix A. Until that exists, this workflow fails at the auth
+# step and nothing else is affected.
+#
+# The offline suite gates the deploy. The integration suite does not run here:
+# it needs credentials, clones the dataset and takes ~30 minutes. Run it
+# locally before pushing a change to the SQL or the runner.
+
+name: Build and deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+# id-token: write is what lets the job mint a short-lived Google token.
+# This repository is public, so no long-lived JSON key is stored anywhere.
+permissions:
+  contents: read
+  id-token: write
+
+# Never let two deploys race to set the jobs' image.
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+env:
+  REGION: us-east1
+  REPO: crash-etl
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned dependencies
+        run: pip install -r requirements.txt -c constraints.txt
+      - name: Offline suite
+        run: python -m unittest discover -s tests
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      # Tag by commit for readability, then deploy the digest that tag
+      # resolves to. A tag can be moved later; a digest cannot.
+      - name: Build and push
+        id: push
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${REPO}/crash-etl"
+          SHA="${GITHUB_SHA::7}"
+          docker build -t "$IMAGE:$SHA" -t "$IMAGE:latest" .
+          docker push "$IMAGE:$SHA"
+          docker push "$IMAGE:latest"
+          DIGEST=$(gcloud artifacts docker images describe "$IMAGE:$SHA" --format='value(image_summary.fully_qualified_digest)')
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Deploying $DIGEST"
+
+      - name: Point both jobs at the new digest
+        run: |
+          gcloud run jobs update crash-etl-delta --image='${{ steps.push.outputs.digest }}' --region="$REGION"
+          gcloud run jobs update crash-etl-full --image='${{ steps.push.outputs.digest }}' --region="$REGION"
