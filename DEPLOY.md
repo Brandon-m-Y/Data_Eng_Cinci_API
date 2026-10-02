@@ -319,13 +319,42 @@ run as `crash-etl-runtime` → tick **Send email notifications** → Save.
 A healthy system returns one row, `ok`. Then check the Scheduled Queries page
 after the first hour and confirm the run shows Succeeded.
 
-**Optional but worth doing once — prove the mail actually arrives.** The
-guards are tested and fire correctly, but nobody has confirmed that *your*
-inbox receives the notification. Temporarily change guard 2's `INTERVAL 36
-HOUR` to `INTERVAL 1 SECOND`, run `python deploy/create_watchdog.py --update
---service-account $RUNTIME_SA`, wait for the next hourly run, confirm the mail
-lands, then revert the file and `--update` again. An alert nobody has ever
-received is an assumption, not a safeguard.
+### Prove the mail actually arrives
+
+Do this once, before step 9. The guards are tested and fire correctly, but
+that only shows the query raises — it does not show the notification reaches
+a person. The query runs as a service account, and a service account has no
+inbox, so this is worth confirming rather than assuming.
+
+Install an always-failing watchdog and trigger it immediately:
+
+```powershell
+python deploy/create_watchdog.py --update --test-alert --run-now --service-account $RUNTIME_SA
+```
+
+Within a minute or two you should get mail about a failed scheduled query,
+with a body saying it is a delivery test. Then **restore the real watchdog**:
+
+```powershell
+python deploy/create_watchdog.py --update --service-account $RUNTIME_SA
+```
+
+**Verify the restore**, because this is the one state you do not want to walk
+away from:
+
+```powershell
+python deploy/create_watchdog.py
+```
+
+With no flags it reports the existing config instead of changing it. If no
+mail arrives, the notification is not reaching you — restore the real
+watchdog first, then reinstall it with `--as-me`, which ties the alert to
+your own account at the cost of depending on your credentials.
+
+Forgetting to restore fails loudly rather than silently: you get an hourly
+mail you cannot miss. That is the right way round for a safeguard, but fix it
+the same day — a watchdog crying wolf is one you will start ignoring, and
+then it protects nothing.
 
 ---
 

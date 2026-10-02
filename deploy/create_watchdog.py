@@ -22,6 +22,7 @@ to your own account at the cost of depending on your credentials.
 import argparse
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -32,6 +33,20 @@ DISPLAY_NAME = 'crash-etl watchdog'
 SCHEDULE = 'every 1 hours'
 SQL_PATH = Path(__file__).with_name('watchdog.sql')
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# --test-alert installs this instead of the real watchdog. It always fails,
+# which is the only way to find out whether the failure email reaches a
+# person. Forgetting to restore the real one is loud rather than silent --
+# an hourly mail you cannot miss -- which is the right way round for a
+# safeguard to fail.
+TEST_SQL = """-- TEMPORARY. Installed by: create_watchdog.py --test-alert
+-- Restore the real watchdog with:
+--   python deploy/create_watchdog.py --update --service-account <runtime SA>
+RAISE USING MESSAGE =
+  'WATCHDOG DELIVERY TEST -- this is not a real alert, nothing is wrong. '
+  'Receiving this proves failure email works. Restore the real watchdog: '
+  'python deploy/create_watchdog.py --update --service-account <runtime SA>';
+"""
 
 
 def main():
@@ -44,6 +59,12 @@ def main():
     parser.add_argument('--as-me', action='store_true',
                         help='run as your own credentials instead; use only if the '
                              'service-account notification does not reach your inbox')
+    parser.add_argument('--test-alert', action='store_true',
+                        help='install an always-failing watchdog to prove the failure '
+                             'email arrives, then rerun with --update to restore')
+    parser.add_argument('--run-now', action='store_true',
+                        help='also trigger a run immediately instead of waiting for '
+                             'the next hourly one')
     args = parser.parse_args()
 
     # dotenv_values, not load_dotenv: .env sets GOOGLE_APPLICATION_CREDENTIALS
@@ -64,7 +85,7 @@ def main():
                  'watchdog as a person ties the alert to that person\'s credentials; '
                  'pass --as-me if you have decided that is what you want.')
 
-    sql = SQL_PATH.read_text(encoding='utf-8')
+    sql = TEST_SQL if args.test_alert else SQL_PATH.read_text(encoding='utf-8')
     client = bigquery_datatransfer.DataTransferServiceClient()
     parent = f'projects/{project}/locations/{location}'
 
@@ -106,9 +127,23 @@ def main():
         print(f'Created {result.name}')
 
     runner = service_account or 'your own credentials'
-    print(f'  runs: {result.schedule}  as: {runner}\n'
-          '  A tripped guard fails the run, and the failed run sends the mail.\n'
-          '  Verify now with DEPLOY.md step 8.')
+    print(f'  runs: {result.schedule}  as: {runner}')
+
+    if args.run_now:
+        client.start_manual_transfer_runs(
+            request=bigquery_datatransfer.StartManualTransferRunsRequest(
+                parent=result.name,
+                requested_run_time=datetime.now(timezone.utc)))
+        print('  triggered a run now; it should finish within a minute or two.')
+
+    if args.test_alert:
+        print('\n  *** THIS IS THE ALWAYS-FAILING TEST WATCHDOG, NOT THE REAL ONE ***\n'
+              '  It fails every hour on purpose. When the mail arrives, restore the\n'
+              '  real watchdog immediately:\n'
+              f'    python deploy/create_watchdog.py --update --service-account {runner}')
+    else:
+        print('  A tripped guard fails the run, and the failed run sends the mail.\n'
+              '  Verify with DEPLOY.md step 8.')
 
 
 if __name__ == '__main__':
