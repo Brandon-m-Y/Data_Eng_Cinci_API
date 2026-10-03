@@ -60,7 +60,7 @@ an audit log with its outcome.
 **It is deployed.** Since 2026-10-02 it runs on Google Cloud without anyone
 present: Cloud Scheduler triggers a Cloud Run Job, GitHub Actions builds and
 ships the image through Workload Identity Federation, and a daily BigQuery
-watchdog plus a Cloud Monitoring policy mail a person when something is
+watchdog plus a Cloud Monitoring policy e-mail a person when something is
 wrong. [OPERATIONS.md](OPERATIONS.md) is how it behaves;
 [DEPLOY.md](DEPLOY.md) is how it was built.
 
@@ -96,17 +96,17 @@ wrong. [OPERATIONS.md](OPERATIONS.md) is how it behaves;
 Everything in the warehouse derives from **one** public source. There is no
 private data, no scraped data and no manual entry anywhere in the pipeline.
 
-|              |                                                                                                                                |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| Dataset      | **Traffic Crash Reports (CPD)**                                                                                          |
-| Publisher    | Cincinnati Police Department, via the City of Cincinnati open data portal                                                      |
-| Portal       | [data.cincinnati-oh.gov](https://data.cincinnati-oh.gov/)                                                                       |
-| Identifier   | Socrata dataset`rvmt-pkmq`                                                                                                   |
-| Access       | Socrata**v3** API, `POST` query body, 50,000-row pages ordered by `:id`                                              |
-| Credential   | A free Socrata app token — rate limiting only. The data itself is public and needs no authentication                          |
-| Full extract | ~435 MB, 433,160 person-rows, 221,289 crashes                                                                                  |
-| Crash dates  | 1900-02-06 to 2026-08-24. Only**2** rows predate 2010, and both are data-entry errors; the usable history starts in 2010 |
-| Columns      | 31, all delivered as strings                                                                                                   |
+|              |                                                                                                                                  |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| Dataset      | **Traffic Crash Reports (CPD)**                                                                                            |
+| Publisher    | Cincinnati Police Department, via the City of Cincinnati open data portal                                                        |
+| Portal       | [data.cincinnati-oh.gov](https://data.cincinnati-oh.gov/)                                                                         |
+| Identifier   | Socrata dataset`rvmt-pkmq`                                                                                                     |
+| Access       | Socrata**v3** API, `POST` query body, 50,000-row pages ordered by `:id`                                                |
+| Credential   | A free Socrata app token — rate limiting only. The data itself is public and needs no authentication                            |
+| Full extract | ~435 MB, 433,160 person-rows, 221,289 crashes                                                                                    |
+| Crash dates  | 1900-02-06 to 2026-08-24. Only **2** rows predate 2010, and both are data-entry errors; the usable history starts in 2010 |
+| Columns      | 31, all delivered as strings                                                                                                     |
 
 The feed is a police **report** extract, not a sensor or telematics feed.
 Every row originates in an officer-completed crash report, which is why it
@@ -209,22 +209,22 @@ the public endpoint and keeps a derived copy in a private BigQuery dataset.
 **The pipeline is deployed and running unattended.** As of 2026-10-02,
 BigQuery dataset `crashes` in `us-east1`:
 
-| Object                                       | Type   |    Rows | Notes                                                                                                                                                   |
-| -------------------------------------------- | ------ | ------: | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `stg_crash_person`                         | table  |   6,790 | Raw feed, all STRING; replaced every load, so it holds whatever the**last** load fetched — currently a 90-day delta window, not the full history |
-| `vw_stg_crash_person_clean`                | view   |         | The one place cleaning happens                                                                                                                          |
-| `fact_crash_person`                        | table  | 433,160 | One row per person/unit per crash; 221,289 crashes, 1900-02-06 to 2026-08-24                                                                            |
-| `dim_date`                                 | table  |   9,497 | 2010-01-01 to 2035-12-31, plus the unknown member                                                                                                       |
-| `dim_time`                                 | table  |   1,441 | Minute grain, plus the unknown member                                                                                                                   |
-| `dim_location`                             | table  |  63,021 | Insert-only, so it grows as amended addresses arrive                                                                                                    |
-| `dim_conditions`                           | table  |   1,977 | Junk dimension                                                                                                                                          |
-| `dim_crash_type`                           | table  |      72 |                                                                                                                                                         |
-| `dim_person_profile`                       | table  |   3,914 | Junk dimension                                                                                                                                          |
-| `dim_crash_date`, `dim_reported_date`    | views  |         | Role-playing views over`dim_date`                                                                                                                     |
-| `etl_load_log`                             | table  |      10 | One row per load, with its status, counts and timings                                                                                                   |
-| `etl_lease`                                | table  |       1 | Which run may write; created by`--setup`                                                                                                              |
-| `ml_crash_panel`                           | table  | 205,746 | 53 neighborhoods × 3,882 days                                                                                                                          |
-| `ml_weather_daily`, `ml_cell_attributes` | tables |       0 | Schema ready; external data not loaded yet                                                                                                              |
+| Object                                       | Type   |    Rows | Notes                                                                                                                                                     |
+| -------------------------------------------- | ------ | ------: | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stg_crash_person`                         | table  |   6,790 | Raw feed, all STRING; replaced every load, so it holds whatever the **last** load fetched — currently a 90-day delta window, not the full history |
+| `vw_stg_crash_person_clean`                | view   |         | The one place cleaning happens                                                                                                                            |
+| `fact_crash_person`                        | table  | 433,160 | One row per person/unit per crash; 221,289 crashes, 1900-02-06 to 2026-08-24                                                                              |
+| `dim_date`                                 | table  |   9,497 | 2010-01-01 to 2035-12-31, plus the unknown member                                                                                                         |
+| `dim_time`                                 | table  |   1,441 | Minute grain, plus the unknown member                                                                                                                     |
+| `dim_location`                             | table  |  63,021 | Insert-only, so it grows as amended addresses arrive                                                                                                      |
+| `dim_conditions`                           | table  |   1,977 | Junk dimension                                                                                                                                            |
+| `dim_crash_type`                           | table  |      72 |                                                                                                                                                           |
+| `dim_person_profile`                       | table  |   3,914 | Junk dimension                                                                                                                                            |
+| `dim_crash_date`, `dim_reported_date`    | views  |         | Role-playing views over`dim_date`                                                                                                                       |
+| `etl_load_log`                             | table  |      10 | One row per load, with its status, counts and timings                                                                                                     |
+| `etl_lease`                                | table  |       1 | Which run may write; created by`--setup`                                                                                                                |
+| `ml_crash_panel`                           | table  | 205,746 | 53 neighborhoods × 3,882 days                                                                                                                            |
+| `ml_weather_daily`, `ml_cell_attributes` | tables |       0 | Schema ready; external data not loaded yet                                                                                                                |
 
 **Where things stand:**
 
@@ -295,6 +295,61 @@ Two episodes worth keeping, because both shaped the design:
 
 ## Architecture
 
+Three files do the work:
+
+| File                  | Job                                                                                                                                                               |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Run_Pipeline.py`     | Orchestration and CLI. Takes the writer lease, calls the extractor, runs the SQL section by section, records the outcome.                                         |
+| `Star_Schema_ETL.sql` | Everything in BigQuery except the panel: DDL and migrations, the cleaning view, staging validation, dimension merges, the fact load, the audit log and the lease. |
+| `ML_Crash_Panel.sql`  | The neighborhood × day panel built on top of the star schema.                                                                                                     |
+
+**How to read the section numbers.** Both SQL files are split on their
+`-- SECTION n:` marker lines, and `Run_Pipeline.py` runs them by number rather
+than top to bottom. The numbers are therefore slots in a file, not an order of
+operations, and three things follow that trip up a first reading:
+
+- **The two files number independently.** "Section 5" always means
+  `Star_Schema_ETL.sql`. The panel's sections are always named as the panel's.
+- **Sections 1, 2, 7 and 10 run only under `--setup`.** That is why the load
+  path below steps from 6 to 9: those sections are not missing, they ran once,
+  earlier.
+- **Section 8 is retired and deliberately left empty.** Delete reconciliation
+  lived there once. It now runs inside Section 5's transaction, so a load
+  cannot leave crashes replaced without their matching deletes, or the
+  reverse. The number was left vacant rather than reused, so the sections
+  after it kept their numbers.
+
+Section 11 is the other number absent from both diagrams: it runs only when a
+load fails.
+
+### Setup path: `--setup`
+
+```
+ python Run_Pipeline.py --setup
+        │
+        ▼
+ create the dataset if it is not there
+        │
+        ▼
+ Section 10   etl_lease table and its one row — run before the lease is
+        │     taken, since it creates the table the lease lives in
+        ▼
+ take the ETL lease ─ one writer at a time ──────────────────────────────┐
+        │                                                                │
+        ├──► Section 1   table DDL, ALTER migrations, cleaning view      │
+        ├──► Section 2   calendar, dim_time and unknown members (guarded)│
+        └──► Section 7   role-playing views: dim_crash_date and          │
+                         dim_reported_date                               │
+                                                            lease released
+```
+
+`--setup` is safe to rerun, and that is the point. Section 1 carries the
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations, so this is also how a
+schema change reaches an existing dataset. `--full --reprocess` runs it first,
+to install the changed cleaning view before rewriting anything.
+
+### Load path: `--delta` or `--full`
+
 ```
  Run_Pipeline.py takes the ETL lease (etl_lease) ─ one writer at a time ─┐
                                                                          │
@@ -321,13 +376,47 @@ Two episodes worth keeping, because both shaped the design:
                  │          commit only while holding the lease          │
                  ├──► Section 6  sanity checks (printed)                 │
                  ▼                                                       │
- ML_Crash_Panel.sql               neighborhood × day panel, ASSERT-gated │
-        │                                                                │
+ ML_Crash_Panel.sql               its own Sections 1-3: feature-table    │
+        │                         DDL, the ASSERT-gated neighborhood ×   │
+        │                         day build, then the panel report       │
         ├──► Section 9  mark the load 'succeeded'  (Section 11 on failure)
         ▼                                                                │
  crashes.ml_crash_panel  ──►  count models (NB GLM / LightGBM Poisson)   │
                                                             lease released
 ```
+
+`--panel` runs the `ML_Crash_Panel.sql` block on its own, under the same lease,
+and touches nothing else.
+
+### SQL section map
+
+`Star_Schema_ETL.sql`:
+
+| Section | Runs              | Contents                                                                                                                          |
+| ------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 1       | `--setup`         | Staging, dimension, fact and `etl_load_log` DDL; `ALTER` migrations; cleaning view                                                |
+| 2       | `--setup`         | Generated calendar, `dim_time` and unknown members (guarded)                                                                      |
+| 3       | Every load        | Staging validation, before any change; the watermark explanation (`@window_start`, `@expected_rows`, `@publish_stamp`)            |
+| 4       | Every load        | Dimension `MERGE`s and key assertions (`@reprocess`)                                                                              |
+| 5       | Every load        | Fact load: crash-level replace, delete reconciliation and the log row, in one transaction fenced by the lease                     |
+| 6       | Every load        | Sanity checks (printed)                                                                                                           |
+| 7       | `--setup`         | Role-playing date views                                                                                                           |
+| 8       | Never             | **Retired**, and left empty so the sections after it kept their numbers. Delete reconciliation moved into Section 5's transaction |
+| 9       | Every load, last  | Mark the load `succeeded`                                                                                                         |
+| 10      | `--setup`, first  | `etl_lease` table and its one row. Runs before the lease is taken, since it creates the table the lease lives in                  |
+| 11      | When a load fails | Mark the load `failed` (inserts the row if the fact never committed)                                                              |
+
+`ML_Crash_Panel.sql`:
+
+| Section | Contents                                                                                                                                                                                     |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1       | `ml_weather_daily` and `ml_cell_attributes` DDL (idempotent)                                                                                                                                 |
+| 2       | Settings, crash-level rollup, cell threshold, per-cell distance to downtown, holidays, spine, features, the `crashes_next_7` target, `ASSERT`s, publish                                      |
+| 3       | Panel report: size, zero fraction, dispersion, target coverage, nearest and farthest cells, split sizes, crashes whose rows disagree on day or cell, neighborhoods held out by the threshold |
+
+Where all of this runs in production — Cloud Scheduler, a Cloud Run Job,
+Artifact Registry — is [Architecture as deployed](#architecture-as-deployed);
+[OPERATIONS.md](OPERATIONS.md) describes how the deployed system behaves.
 
 ---
 
@@ -809,10 +898,10 @@ replaced only if every `ASSERT` passes:
 
 **Scope:** the lags are event-time history. They use counts as eventually
 reported, not what was known on the day a forecast would be made, and the
-feed runs about 2 weeks behind. That's fine for the retrospective panel, but
-a deployed forecast needs a defined prediction time and horizon first (see
-[Roadmap](#roadmap)). Observed weather for the target day is likewise not a
-forecast.
+feed runs 39 days behind (measured 2026-10-02). That's fine for the
+retrospective panel, but a deployed forecast needs a defined prediction
+time and horizon first (see [Roadmap](#roadmap)). Observed weather for the
+target day is likewise not a forecast.
 
 Holiday flags were checked against pandas' `USFederalHolidayCalendar`. All 111
 observed holidays match, plus the 14 actual dates that fell on weekends.
@@ -972,31 +1061,8 @@ feed:
 | `Dockerfile`, `.dockerignore` | Batch image for the Cloud Run Job, base pinned by digest.                                                                                                                                                                                                |
 | `Get_Data.ipynb`                | Scratch notebook. Uses the old single GET that downloads all ~435 MB.                                                                                                                                                                                    |
 
-### SQL section map
-
-`Star_Schema_ETL.sql`:
-
-| Section | Runs               | Contents                                                                                                                     |
-| ------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| 1       | `--setup`        | Staging, dimension, fact and`etl_load_log` DDL; `ALTER` migrations; cleaning view                                        |
-| 2       | `--setup`        | Generated calendar,`dim_time` and unknown members (guarded)                                                                |
-| 3       | Every load         | Staging validation, before any change; the watermark explanation (`@window_start`, `@expected_rows`, `@publish_stamp`) |
-| 4       | Every load         | Dimension`MERGE`s and key assertions (`@reprocess`)                                                                      |
-| 5       | Every load         | Fact load: crash-level replace, delete reconciliation and the log row, in one transaction fenced by the lease                |
-| 6       | Every load         | Sanity checks (printed)                                                                                                      |
-| 7       | `--setup`        | Role-playing date views                                                                                                      |
-| 8       | Retired            | Folded into Section 5                                                                                                        |
-| 9       | Every load, last   | Mark the load`succeeded`                                                                                                   |
-| 10      | `--setup`, first | `etl_lease` table and its one row                                                                                          |
-| 11      | When a load fails  | Mark the load`failed` (inserts the row if the fact never committed)                                                        |
-
-`ML_Crash_Panel.sql`:
-
-| Section | Contents                                                                                                                                                                                     |
-| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1       | `ml_weather_daily` and `ml_cell_attributes` DDL (idempotent)                                                                                                                             |
-| 2       | Settings, crash-level rollup, cell threshold, per-cell distance to downtown, holidays, spine, features, the`crashes_next_7` target, `ASSERT`s, publish                                   |
-| 3       | Panel report: size, zero fraction, dispersion, target coverage, nearest and farthest cells, split sizes, crashes whose rows disagree on day or cell, neighborhoods held out by the threshold |
+The two SQL files are run section by section; what is in each one is the
+[SQL section map](#sql-section-map) under [Architecture](#architecture).
 
 ---
 
