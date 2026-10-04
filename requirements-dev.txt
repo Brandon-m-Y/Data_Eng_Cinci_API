@@ -4,3 +4,9 @@
 seaborn==0.13.2
 matplotlib==3.10.7
 ipykernel==6.30.0
+
+# ER diagram generation (Build_ERD.py). Also needs a Graphviz install for
+# the image formats: `conda install graphviz`, or graphviz.org/download.
+# Set GRAPHVIZ_BIN if `dot` is not on PATH.
+eralchemy==1.7.0
+graphviz==0.21
