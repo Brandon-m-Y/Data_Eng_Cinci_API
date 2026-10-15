@@ -4,19 +4,14 @@ title {label: "Cincinnati crash ETL: every table in Star_Schema_ETL.sql", size: 
     socrata_version {label:"STRING"}
     socrata_created_at {label:"STRING"}
     socrata_updated_at {label:"STRING"}
-    instanceid {label:"STRING"}
-    localreportno {label:"STRING"}
-    crashdate {label:"STRING"}
-    datecrashreported {label:"STRING"}
+    reportnumber {label:"STRING"}
+    unitno {label:"STRING"}
+    eventdate {label:"STRING"}
+    reportdate {label:"STRING"}
     address {label:"STRING"}
     latitude {label:"STRING"}
     longitude {label:"STRING"}
-    zip {label:"STRING"}
-    community_council_neighborhood {label:"STRING"}
-    cpd_neighborhood {label:"STRING"}
-    sna_neighborhood {label:"STRING"}
-    roadclass {label:"STRING"}
-    roadclassdesc {label:"STRING"}
+    snaneighborhood {label:"STRING"}
     crashlocation {label:"STRING"}
     lightconditionsprimary {label:"STRING"}
     roadconditionsprimary {label:"STRING"}
@@ -25,11 +20,9 @@ title {label: "Cincinnati crash ETL: every table in Star_Schema_ETL.sql", size: 
     weather {label:"STRING"}
     mannerofcrash {label:"STRING"}
     crashseverity {label:"STRING"}
-    crashseverityid {label:"STRING"}
     typeofperson {label:"STRING"}
-    unittype {label:"STRING"}
     gender {label:"STRING"}
-    age {label:"STRING"}
+    agerange {label:"STRING"}
     injuries {label:"STRING"}
 [dim_date]
     *date_key {label:"INT64"}
@@ -127,6 +120,7 @@ title {label: "Cincinnati crash ETL: every table in Star_Schema_ETL.sql", size: 
     person_profile_key {label:"INT64"}
     instanceid {label:"STRING"}
     localreportno {label:"STRING"}
+    source_dataset {label:"STRING"}
     socrata_id {label:"STRING"}
     crash_date {label:"DATE"}
     crash_datetime {label:"DATETIME"}
@@ -138,6 +132,8 @@ title {label: "Cincinnati crash ETL: every table in Star_Schema_ETL.sql", size: 
     is_injured {label:"INT64"}
     is_fatal {label:"INT64"}
     age {label:"INT64"}
+    age_range {label:"STRING"}
+    neighborhood {label:"STRING"}
     socrata_version {label:"STRING"}
     socrata_updated_at {label:"TIMESTAMP"}
     loaded_at {label:"TIMESTAMP"}
@@ -170,6 +166,6 @@ dim_conditions."conditions_key" 1--* fact_crash_person."conditions_key"
 dim_date."date_key" 1--* fact_crash_person."crash_date_key"
 dim_time."time_key" 1--* fact_crash_person."crash_time_key"
 dim_date."date_key" 1--* fact_crash_person."reported_date_key"
+dim_location."location_key" 1--* fact_crash_person."location_key"
 dim_crash_type."crash_type_key" 1--* fact_crash_person."crash_type_key"
 dim_person_profile."person_profile_key" 1--* fact_crash_person."person_profile_key"
-dim_location."location_key" 1--* fact_crash_person."location_key"

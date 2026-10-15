@@ -9,19 +9,14 @@ stg_crash_person {
    STRING socrata_version 
    STRING socrata_created_at 
    STRING socrata_updated_at 
-   STRING instanceid 
-   STRING localreportno 
-   STRING crashdate 
-   STRING datecrashreported 
+   STRING reportnumber 
+   STRING unitno 
+   STRING eventdate 
+   STRING reportdate 
    STRING address 
    STRING latitude 
    STRING longitude 
-   STRING zip 
-   STRING community_council_neighborhood 
-   STRING cpd_neighborhood 
-   STRING sna_neighborhood 
-   STRING roadclass 
-   STRING roadclassdesc 
+   STRING snaneighborhood 
    STRING crashlocation 
    STRING lightconditionsprimary 
    STRING roadconditionsprimary 
@@ -30,11 +25,9 @@ stg_crash_person {
    STRING weather 
    STRING mannerofcrash 
    STRING crashseverity 
-   STRING crashseverityid 
    STRING typeofperson 
-   STRING unittype 
    STRING gender 
-   STRING age 
+   STRING agerange 
    STRING injuries 
 }
 dim_date {
@@ -139,6 +132,7 @@ fact_crash_person {
    INT64 person_profile_key FK
    STRING instanceid 
    STRING localreportno 
+   STRING source_dataset 
    STRING socrata_id 
    DATE crash_date 
    DATETIME crash_datetime 
@@ -150,6 +144,8 @@ fact_crash_person {
    INT64 is_injured 
    INT64 is_fatal 
    INT64 age 
+   STRING age_range 
+   STRING neighborhood 
    STRING socrata_version 
    TIMESTAMP socrata_updated_at 
    TIMESTAMP loaded_at 
@@ -185,7 +181,7 @@ dim_conditions 1--0+ fact_crash_person : has
 dim_date 1--0+ fact_crash_person : has
 dim_time 1--0+ fact_crash_person : has
 dim_date 1--0+ fact_crash_person : has
+dim_location 1--0+ fact_crash_person : has
 dim_crash_type 1--0+ fact_crash_person : has
 dim_person_profile 1--0+ fact_crash_person : has
-dim_location 1--0+ fact_crash_person : has
 ```

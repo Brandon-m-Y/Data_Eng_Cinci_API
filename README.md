@@ -25,7 +25,7 @@ the source, each discovered the expensive way:
   entire dataset. They are excluded from it.
 
 **What exists today:** 221,289 crashes and 433,160 person-rows in a Kimball
-star schema, plus a complete 53-neighborhood × 3,882-day panel with
+star schema, plus a complete neighborhood × day panel with
 leakage-safe lag features and a forecast label. It runs as a container on
 Cloud Run under a single-writer lease, writes an audit row for every run, and
 has two independent alerts — both of which have been deliberately made to fire
@@ -40,8 +40,9 @@ is not trained. See [Roadmap](#roadmap).
 ## What it is
 
 An end-to-end data engineering project built on the Cincinnati Police
-**Traffic Crash Reports** open-data feed (Socrata dataset `rvmt-pkmq`). It has
-three layers:
+traffic-crash open-data feed: Socrata dataset `7iz8-ecuw` since 2026-10-15,
+with the history before that loaded from `rvmt-pkmq` (see
+[The source switch](#the-source-switch-2026-10-15)). It has three layers:
 
 1. **Extract and load.** A Python pipeline pages the Socrata API and stages
    the raw feed in BigQuery.
@@ -98,20 +99,74 @@ private data, no scraped data and no manual entry anywhere in the pipeline.
 
 |              |                                                                                                                                  |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| Dataset      | **Traffic Crash Reports (CPD)**                                                                                            |
+| Dataset      | **Cincinnati Police Department Reported Traffic Crashes** (until 2026-10-15: **Traffic Crash Reports (CPD)**)              |
 | Publisher    | Cincinnati Police Department, via the City of Cincinnati open data portal                                                        |
 | Portal       | [data.cincinnati-oh.gov](https://data.cincinnati-oh.gov/)                                                                         |
-| Identifier   | Socrata dataset`rvmt-pkmq`                                                                                                     |
+| Identifier   | Socrata dataset `7iz8-ecuw` (until 2026-10-15: `rvmt-pkmq`, now private)                                                       |
 | Access       | Socrata**v3** API, `POST` query body, 50,000-row pages ordered by `:id`                                                |
 | Credential   | A free Socrata app token — rate limiting only. The data itself is public and needs no authentication                            |
-| Full extract | ~435 MB, 433,160 person-rows, 221,289 crashes                                                                                    |
+| Full extract | `rvmt-pkmq`: ~435 MB, 433,160 person-rows, 221,289 crashes. `7iz8-ecuw`: 449,817 person-rows, 221,268 crashes (2026-10-15) |
 | Crash dates  | 1900-02-06 to 2026-08-24. Only **2** rows predate 2010, and both are data-entry errors; the usable history starts in 2010 |
-| Columns      | 31, all delivered as strings                                                                                                     |
+| Columns      | `rvmt-pkmq` 31, `7iz8-ecuw` 20, all delivered as strings                                                                         |
 
 The feed is a police **report** extract, not a sensor or telematics feed.
 Every row originates in an officer-completed crash report, which is why it
 carries severity and injury coding, and why it arrives well over a month
 after the event.
+
+### The source switch (2026-10-15)
+
+On 2026-10-15 the city made `rvmt-pkmq` private: every request returns
+`403 authentication_required`, with or without an app token. Its replacement,
+`7iz8-ecuw`, republishes the same history with fewer columns, and says the
+police department has moved to a new reporting system: no crash after
+2026-08-24 is published yet, and daily updates are expected to resume on
+2026-10-31.
+
+**The history stays; only new crashes come from the new feed.** Every fact
+row carries `source_dataset`:
+
+- `rvmt-pkmq` — the 221,289 crashes loaded before the switch. **Frozen.** No
+  load rewrites, re-hashes or deletes them, and `--full --reprocess` can no
+  longer rebuild them, so these tables are now the only copy of that feed
+  (`crashes_archive_rvmt` holds a backup taken 2026-10-15). The integration
+  suite fingerprints every history row and checks it after each load.
+- `7iz8-ecuw` — every crash whose report number the history doesn't have.
+  The new `reportnumber` is the old `localreportno`: 220,957 of the 221,289
+  history crashes match one in the new feed. The rest don't match each other
+  on time and block address either (332 and 311), so they are different
+  crashes, not renumbered ones, and the 311 load as new.
+
+How each column carries over, measured on the 220,957 crashes in both feeds:
+
+| Star schema column | `rvmt-pkmq` | `7iz8-ecuw` | What new crashes get |
+| --- | --- | --- | --- |
+| `instanceid` | GUID crash key | — | `reportnumber` (GUIDs and report numbers can't collide) |
+| `localreportno` | `localreportno` | `reportnumber` | the same value; 99.85% of crashes match |
+| `crash_datetime` | `crashdate` | `eventdate` | direct; 99.98% identical |
+| reported date | `datecrashreported` | `reportdate` | direct; same day 99.9%, same minute 87% |
+| `address` | block, `16XX JOSEPH ST` | **exact house number**, `1610 Joseph St` | masked back to the block; reproduces the old value for 99.94% |
+| `latitude` / `longitude` | `latitude_x` / `longitude_x` | `latitude` / `longitude` | direct; both fuzzed, a median 79 m apart |
+| conditions, manner of crash | five coded columns | same columns, title case | direct; Unknown/Other renumbered, which the cleaning view already ignores |
+| `crash_severity` | `5 - PROPERTY DAMAGE ONLY` | `Property Damage Only` (no code) | direct, plus one rule: `Nonfatal Injury` → *Injury (Severity Unspecified)* |
+| `coding_era` | from `crashseverityid` | — | from the crash date (the 2019 switch was a clean cutover) |
+| type of person, gender, injuries | coded | same codes, title case | direct |
+| `age` | exact | `agerange` | NULL; `age_range` from the published range |
+| `age_range` (new) | from exact age | `agerange` | the one age band both share: `00-15`, `16-19`, `20-24`, `25-34` … `75+` |
+| `neighborhood` (new) | — | `snaneighborhood` | the city's current SNA names, filled for the history by report number |
+| `zip`, `community_council_neighborhood`, `cpd_neighborhood`, `sna_neighborhood`, road class, unit type, `crashseverityid` | published | — | NULL |
+
+Two differences in grain. The new feed repeats 2.6–4.5% of its rows exactly
+in every year (0.4% in the old one), including 12,789 vehicles with two or
+more identical drivers. A repeated **driver** row is loaded once — a vehicle
+has one driver — which brings drivers per crash to 1.759 against the old
+feed's 1.739. Repeated occupants and pedestrians are kept, since without an
+exact age or vehicle type two real passengers can look identical, and
+dropping them would leave 7% fewer occupants than the old feed had.
+
+Its values are title case where the old feed's were upper case, so new
+crashes get dimension members of their own; the canonical columns line up
+across both.
 
 ### What one row is
 
@@ -126,7 +181,9 @@ Counting rows counts people; counting crashes needs
 `fact_crash_person` rather than flattening it, because collapsing to one row
 per crash throws away every passenger and pedestrian.
 
-The 31 columns fall into five groups:
+`rvmt-pkmq`'s 31 columns fall into five groups (`7iz8-ecuw` keeps the subset
+mapped in [The source switch](#the-source-switch-2026-10-15), and adds
+`unitno`):
 
 | Group                | Columns                                                                                                                                             |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -136,10 +193,11 @@ The 31 columns fall into five groups:
 | Crash classification | `mannerofcrash`, `crashseverity`, `crashseverityid`                                                                                           |
 | Person               | `typeofperson`, `unittype`, `gender`, `age`, `injuries`                                                                                   |
 
-**There are no direct identifiers.** No names, no license or VIN numbers, no
-report narrative, and no exact addresses — the publisher masks those before
-release (see below). The person attributes present are demographic and
-injury coding only.
+**There are no direct identifiers.** No names, no license or VIN numbers and
+no report narrative. `rvmt-pkmq` also masked addresses to the block;
+`7iz8-ecuw` publishes the house number, and the pipeline masks it back to the
+block before it reaches the warehouse. The person attributes present are
+demographic and injury coding only.
 
 ### How it updates, and how far behind it runs
 
@@ -168,7 +226,9 @@ to lag its features to roughly **t−40**, not to the reporting lag.
 Two privacy treatments are applied before release, and both have
 consequences for anything built on top:
 
-- **Addresses are masked to the block** — `2XX W MITCHELL AV`.
+- **Addresses are masked to the block** — `2XX W MITCHELL AV`. (`rvmt-pkmq`
+  only; `7iz8-ecuw` publishes `249 E Mitchell Av`, which the cleaning view
+  masks the same way.)
 - **Each row's latitude and longitude are independently randomized** around
   the true location, and **redrawn on every publish**. The rows of a single
   crash sit a median 113 m apart. Typical offset from the row's own
@@ -178,7 +238,8 @@ consequences for anything built on top:
 So exact coordinates are not reproducible between publishes and not
 trustworthy within one. Categorical location — neighborhood, road class,
 intersection flag — *is* perfectly stable, which is why `ml_crash_panel` is
-built on `cpd_neighborhood` and why coordinates are excluded from the change
+built on neighborhoods (`neighborhood` since the source switch,
+`cpd_neighborhood` before) and why coordinates are excluded from the change
 hash. [Source data gotchas](#source-data-gotchas) has the full list of
 quirks, including the two coding eras and the junk values.
 
@@ -258,8 +319,9 @@ cap have only ever executed locally. The `crash-etl-full` job has never run
 at all. The first Sunday full load is the real test.
 
 **Verified behavior.** The whole suite runs against a fresh clone of
-production (`tests/integration_bigquery.py`, 56 checks, last green
-2026-10-01), so these are observed, not intended:
+production (`tests/integration_bigquery.py`, 69 checks since the 2026-10-15
+source switch; last fully green 2026-10-01, at 56), so these are observed,
+not intended:
 
 - **Rerun:** a second `--delta` or `--full` over unchanged data is a no-op --
   0 crashes new, changed or removed.
@@ -353,7 +415,7 @@ to install the changed cleaning view before rewriting anything.
 ```
  Run_Pipeline.py takes the ETL lease (etl_lease) ─ one writer at a time ─┐
                                                                          │
- Socrata v3 API (rvmt-pkmq)                                              │
+ Socrata v3 API (7iz8-ecuw)                                              │
         │  POST query, 50K-row pages, ORDER BY :id                       │
         ▼                                                                │
  Get_Data.fetch(since)            raw strings, person-level grain;       │
@@ -983,7 +1045,7 @@ feed:
   [Load strategy](#load-strategy-delta-vs-full)); any per-crash distance or
   point-in-polygon result is unreliable; and anything location-based should
   use the categorical fields or an aggregate over many rows. `ml_crash_panel`
-  is unaffected because it is built on `cpd_neighborhood`.
+  is unaffected because it is built on neighborhoods (`neighborhood`).
 - **The v3 API ignores `$limit` / `$offset` on GET** and returns the full
   ~435 MB. Paging only works through a POSTed query body.
 - **Socrata omits NULL fields** from JSON rows, so `fetch()` reindexes to a
@@ -1025,7 +1087,7 @@ feed:
 | Downtown anchored at Fountain Square, verified against the data             | Fountain Square (39.1011, −84.5125) is Cincinnati's central public square and the conventional centre of the CBD, so it needs no arbitrary choice to defend. It was checked against this dataset rather than taken on trust: the median coordinate of the 5XX VINE ST block (Fountain Square's own block, n=256) is 70 m away, and the median of the whole`C. B. D. / RIVERFRONT` neighborhood (n=30,766) is 120 m away. Both independent estimates land inside the published coordinate fuzz, which is as close as this data can resolve.                                                                                                                                                                                                        |
 | Distance kept raw per row, aggregated to a median per cell                  | The two uses need different treatment. On the fact the honest thing is the row's own distance, left noisy and documented as such. In the panel a feature has to be stable, so the cell's centre is the marginal median of its crash coordinates — the fuzz (~106 m) and the ~3.7% of rows that sit over 2 km from their own address block both wash out of a median over hundreds of crashes, where a mean would chase them.                                                                                                                                                                                                                                                                                                                        |
 | Panel is a table, not a view                                                | Training reads a stable snapshot, reads are cheap, and publishing waits for the assertions to pass.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Forecast target is the next 7 days per`cpd_neighborhood`                  | Daily counts at neighborhood grain are too sparse to model: 0.84 per cell-day with 54% zeros, so a next-day model predicts 0 or 1 and shows no skill over a seasonal baseline. Weekly totals average ~6 per cell.`cpd_neighborhood` is the reporting agency's own geography and the least sparse of the three schemes. The panel carries the label as `crashes_next_7` (NULL for the last 7 days, where the window would return a short sum), checked on every build against a recomputation from the following seven days. The panel stays event-time, so lagging the features to the forecast issue time and swapping observed weather for a forecast belong in the training code, where the issue time is known. See `crash-panel-spec.md`. |
+| Forecast target is the next 7 days per`cpd_neighborhood`                  | Daily counts at neighborhood grain are too sparse to model: 0.84 per cell-day with 54% zeros, so a next-day model predicts 0 or 1 and shows no skill over a seasonal baseline. Weekly totals average ~6 per cell.`cpd_neighborhood` is the reporting agency's own geography and the least sparse of the three schemes. Since the 2026-10-15 source switch the default cell is `neighborhood` instead: `7iz8-ecuw` has no CPD neighborhood, and `neighborhood` (its SNA names, filled for the history by report number) is the only scheme that spans both sources. The panel carries the label as `crashes_next_7` (NULL for the last 7 days, where the window would return a short sum), checked on every build against a recomputation from the following seven days. The panel stays event-time, so lagging the features to the forecast issue time and swapping observed weather for a forecast belong in the training code, where the issue time is known. See `crash-panel-spec.md`. |
 | A neighborhood joins the panel after 100 crashes, not on first sight        | One misspelling, or one crash geocoded into a place the city doesn't use, would otherwise add a cell that is almost entirely zeros and drag down every pooled model. The threshold is self-maintaining, where a fixed list would need editing whenever the city changes its geography, and the panel report prints every held-out neighborhood with its count so a real one sitting just under the line stays visible.                                                                                                                                                                                                                                                                                                                               |
 | Panel is fully rebuilt each load, not incrementally                         | Rolling features and zero-filled cells depend on neighboring days. A late or amended crash changes`lag_7`, `roll_28`, `roll_91` and `lag_364` for up to a year of later rows in its cell. At about 200K rows a rebuild takes seconds, while an incremental version would need to recompute a trailing window anyway.                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Holidays flag both actual and observed dates                                | July 4 traffic happens on the 4th even when the day off is the 3rd.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -1044,7 +1106,7 @@ feed:
 | `Run_Pipeline.py`               | Orchestration and CLI. Holds the lease, runs the SQL section by section, passes query parameters and records the outcome.                                                                                                                                |
 | `tests/test_regressions.py`     | Offline tests (no credentials or network): extraction checks, staging schema, config and rendering, label grammar, CLI rules.`python -m unittest discover -s tests`                                                                                    |
 | `tests/test_lock_safety.py`     | Offline tests for the writer lock: acquisition, outcome tracking, and the takeover attempts that must fail. Same runner.                                                                                                                                 |
-| `tests/integration_bigquery.py` | End-to-end test on a throwaway clone of the dataset: 56 checks, about 30 minutes, needs credentials. Run command in its docstring.                                                                                                                       |
+| `tests/integration_bigquery.py` | End-to-end test on a throwaway clone of the dataset: 69 checks, about 35 minutes, needs credentials. Run command in its docstring.                                                                                                                       |
 | `DEPLOY.md`                     | Step-by-step Cloud Run deployment: every command in order, each with a verification. The design behind it is in[Deployment](#deployment).                                                                                                                 |
 | `OPERATIONS.md`                 | How the deployed pipeline behaves: what triggers it (Cloud Scheduler, not GitHub), what happens inside a run, the resource inventory, what is verified vs assumed, and the gotchas found while deploying it.                                             |
 | `deploy/watchdog.sql`           | Daily health check (14:00 UTC) run as a BigQuery scheduled query. Four guards: a stuck lease, a stalled pipeline, a stale feed, and a feed that republishes without advancing. A tripped guard fails the run, and the failed run is what sends the mail. |
@@ -1201,7 +1263,8 @@ In rough priority order, from `TODO.md` and the panel spec:
 
 ## Links
 
-- The dataset: [data.cincinnati-oh.gov/d/rvmt-pkmq](https://data.cincinnati-oh.gov/d/rvmt-pkmq) — Traffic Crash Reports (CPD)
+- The dataset: [data.cincinnati-oh.gov/d/7iz8-ecuw](https://data.cincinnati-oh.gov/d/7iz8-ecuw) — Cincinnati Police Department Reported Traffic Crashes
+- The retired dataset the history came from: `rvmt-pkmq` — Traffic Crash Reports (CPD), private since 2026-10-15
 - The portal: [data.cincinnati-oh.gov](https://data.cincinnati-oh.gov/)
 - Login / app token: [data.cincinnati-oh.gov/profile/edit/developer_settings](https://data.cincinnati-oh.gov/profile/edit/developer_settings)
 - Pagination: [support.socrata.com/hc/en-us/articles/202949268-How-to-query-more-than-1000-rows-of-a-dataset](https://support.socrata.com/hc/en-us/articles/202949268-How-to-query-more-than-1000-rows-of-a-dataset)

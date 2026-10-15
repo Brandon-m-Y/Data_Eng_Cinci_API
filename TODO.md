@@ -3,10 +3,18 @@
 Completed work isn't listed here. The reasoning behind decisions already made
 lives in README.md under "Design decisions"; the audits are in AUDIT.md.
 
-Production is on the current schema as of 2026-10-01; nothing is pending
-there.
+**Pending in production:** the 2026-10-15 source switch (`rvmt-pkmq` →
+`7iz8-ecuw`). The code is written; the rollout steps are in OPERATIONS.md,
+The source switch. Both triggers are paused until it is done.
 
 ## Watch
+
+- **The first rows from CPD's new reporting system** (expected after
+  2026-10-31). The cleaning view was measured on the history `7iz8-ecuw`
+  republishes; new-system rows may bring new labels (Section 6 lists any it
+  doesn't recognise), a new report-number format, or a different rate of
+  repeated rows. Check `persons_per_crash` for `7iz8-ecuw` in Section 6
+  (expected ~1.99).
 
 - **Crash churn against the deletion cap.** Each publish re-keys a handful of
   `instanceid`s, which a load sees as that many removed and as many added:
@@ -22,6 +30,11 @@ there.
   A full load has 88× headroom over the observed 25. A delta is the tighter
   case, and even if every re-key landed inside the 90-day window it would be
   25 against 100.
+
+  These are `rvmt-pkmq` figures. Since the source switch only `7iz8-ecuw`
+  crashes can be deleted, and that feed keys crashes on the report number,
+  which hasn't been seen to re-key. Both caps sit at the floor of 100 until
+  the fact holds 10,000 of its crashes.
 
   **Third data point, 2026-10-02: 0 removed, 0 new.** The feed republished
   (`socrata_updated_at` 10-01T17:37 → 10-02T17:40) and the first Cloud Run

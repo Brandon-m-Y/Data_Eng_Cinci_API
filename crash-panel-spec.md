@@ -3,8 +3,9 @@
 ## Objective
 
 Build a complete space-time panel from the Cincinnati Traffic Crash Reports dataset
-(Socrata `rvmt-pkmq`) so that a count model can be trained on crash **rates**, not
-crash composition.
+(Socrata `rvmt-pkmq` until 2026-10-15, `7iz8-ecuw` since; see README.md, The source
+switch) so that a count model can be trained on crash **rates**, not crash
+composition.
 
 The source data contains only crashes. Every row is a positive event, so it cannot
 answer "how likely is a crash." Aggregating to a complete grid of
@@ -18,7 +19,8 @@ crash occurred appear as `crashes = 0`.
 
 ## Step 1 — Ingest
 
-- Endpoint: `https://data.cincinnati-oh.gov/resource/rvmt-pkmq.json`
+- Endpoint: `https://data.cincinnati-oh.gov/resource/7iz8-ecuw.json` (was `rvmt-pkmq`,
+  private since 2026-10-15)
 - Page with `$limit` / `$offset`, ordered by `:id`. Use `$limit=50000`.
 - Socrata returns all fields as strings. Nothing is typed until you type it.
 - **Do not hardcode column names from this spec.** Inspect the actual response
@@ -128,6 +130,11 @@ a forecast available before that day. The SQL panel is not an as-of feature stor
 **Predict the next 7 days of crashes per neighborhood**, with
 `cpd_neighborhood` as the canonical cell (53 neighborhoods; it is the geography
 the reporting agency uses, and the least sparse of the three schemes).
+
+*Changed 2026-10-15:* the canonical cell is now the fact's `neighborhood` — the
+50 SNA neighborhoods as `7iz8-ecuw` names them, filled for the history by report
+number. The new feed publishes no CPD neighborhood, so `cpd_neighborhood` stops
+at the history, and a panel on it would read zero crashes for every later day.
 
 Daily counts at this grain are too sparse to model honestly: 0.84 crashes per
 cell-day with 54% zeros, so a next-day model mostly predicts 0 or 1 and shows

@@ -1,12 +1,18 @@
-"""Extract: pull Traffic Crash Reports (CPD) from the Cincinnati Socrata API.
+"""Extract: pull CPD Reported Traffic Crashes from the Cincinnati Socrata API.
 
-Grain is one row per PERSON/UNIT per crash (~1.96 rows per crash). Do not
-dedupe on instanceid — that collapses the feed to one row per crash and
-drops every passenger and pedestrian the star schema is built around.
+Source is dataset 7iz8-ecuw. It replaced rvmt-pkmq, which the city made
+private on 2026-10-15; the history loaded from rvmt-pkmq stays in BigQuery
+and is never re-extracted (Star_Schema_ETL.sql, Section 5).
+
+Grain is one row per PERSON/UNIT per crash (~2.03 rows per crash). Do not
+dedupe on reportnumber — that collapses the feed to one row per crash and
+drops every passenger and pedestrian the star schema is built around. The
+feed does repeat some rows exactly; SQL Section 5 decides which repeats are
+real people, so the extract keeps every row.
 
 Usage:
   from Get_Data import fetch
-  df = fetch()                    # full history (~433K rows, ~9 pages)
+  df = fetch()                    # full history (~450K rows, ~9 pages)
   df = fetch(since='2026-06-01')  # crashes on/after a date (delta window)
 """
 
@@ -22,8 +28,9 @@ from urllib3.util.retry import Retry
 
 load_dotenv()
 
-ENDPOINT = 'https://data.cincinnati-oh.gov/api/v3/views/rvmt-pkmq/query.json'
-METADATA_ENDPOINT = 'https://data.cincinnati-oh.gov/api/views/rvmt-pkmq.json'
+DATASET_ID = '7iz8-ecuw'
+ENDPOINT = f'https://data.cincinnati-oh.gov/api/v3/views/{DATASET_ID}/query.json'
+METADATA_ENDPOINT = f'https://data.cincinnati-oh.gov/api/views/{DATASET_ID}.json'
 PAGE_SIZE = 50000
 
 # The v3 endpoint ignores $limit/$offset on a GET and returns the whole
@@ -34,13 +41,11 @@ PAGE_SIZE = 50000
 # so without this list a page where a column is entirely null would drop it.
 COLUMNS = [
     ':id', ':version', ':created_at', ':updated_at',
-    'instanceid', 'localreportno', 'crashdate', 'datecrashreported', 'dayofweek',
-    'address_x', 'latitude_x', 'longitude_x', 'zip',
-    'community_council_neighborhood', 'cpd_neighborhood', 'sna_neighborhood',
-    'roadclass', 'roadclassdesc', 'crashlocation',
+    'reportnumber', 'unitno', 'eventdate', 'reportdate',
+    'address', 'latitude', 'longitude', 'snaneighborhood', 'crashlocation',
     'lightconditionsprimary', 'roadconditionsprimary', 'roadcontour', 'roadsurface',
-    'weather', 'mannerofcrash', 'crashseverity', 'crashseverityid',
-    'typeofperson', 'unittype', 'gender', 'age', 'injuries',
+    'weather', 'mannerofcrash', 'crashseverity',
+    'typeofperson', 'gender', 'agerange', 'injuries',
 ]
 
 
@@ -119,7 +124,7 @@ def validate_frame(frame, expected_rows, publish_stamp):
     """Reject incomplete rows and duplicate IDs; never silently deduplicate people."""
     if len(frame) != expected_rows or frame.empty:
         raise InvalidSnapshot(f'Expected {expected_rows} source rows, received {len(frame)}')
-    for column in (':id', 'instanceid', ':updated_at'):
+    for column in (':id', 'reportnumber', ':updated_at'):
         if column not in frame or frame[column].isna().any():
             raise InvalidSnapshot(f'Missing required source field: {column}')
         if frame[column].astype('string').str.strip().eq('').any():
@@ -147,7 +152,7 @@ def fetch(since=None, page_size=PAGE_SIZE):
     where = ''
     if since:
         # fromisoformat rejects anything that isn't a date, so no SoQL injection
-        where = f" WHERE crashdate >= '{date.fromisoformat(since).isoformat()}T00:00:00'"
+        where = f" WHERE eventdate >= '{date.fromisoformat(since).isoformat()}T00:00:00'"
     with _new_session() as session:
         for attempt in range(3):
             try:
@@ -190,4 +195,4 @@ def _fetch_once(session, where, since, page_size):
 
 if __name__ == '__main__':
     df = fetch()
-    print(f'{len(df):,} rows, {df["instanceid"].nunique():,} crashes')
+    print(f'{len(df):,} rows, {df["reportnumber"].nunique():,} crashes')

@@ -2,6 +2,7 @@
 
 import re
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -17,14 +18,14 @@ from Pipeline_Config import Config
 class StagingTests(unittest.TestCase):
     def test_preserves_people_invalid_values_and_nulls(self):
         raw = pd.DataFrame([
-            {':id': 'person-a', 'instanceid': 'crash-a', 'age': 'BB'},
-            {':id': 'person-b', 'instanceid': 'crash-a', 'age': None},
+            {':id': 'person-a', 'reportnumber': 'crash-a', 'agerange': 'BB'},
+            {':id': 'person-b', 'reportnumber': 'crash-a', 'agerange': None},
         ])
         result = staging.build_staging_frame(raw)
         self.assertEqual(list(result.columns), staging.STAGING_COLUMNS)
         self.assertEqual(len(result), 2)
-        self.assertEqual(result.loc[0, 'age'], 'BB')
-        self.assertTrue(pd.isna(result.loc[1, 'age']))
+        self.assertEqual(result.loc[0, 'agerange'], 'BB')
+        self.assertTrue(pd.isna(result.loc[1, 'agerange']))
         self.assertEqual(result.socrata_id.tolist(), ['person-a', 'person-b'])
 
     def test_python_columns_match_sql_staging_schema(self):
@@ -77,7 +78,7 @@ class ExtractTests(unittest.TestCase):
         self.addCleanup(metadata.stop)
 
     def row(self, person):
-        return {':id': person, 'instanceid': 'crash-a', ':updated_at': self.stamp}
+        return {':id': person, 'reportnumber': 'crash-a', ':updated_at': self.stamp}
 
     def probe(self, count=2, stamp=None):
         return [{'row_count': str(count), 'stamped_rows': str(count),
@@ -89,9 +90,9 @@ class ExtractTests(unittest.TestCase):
         ]) as query:
             result = extract.fetch(since='2026-06-01', page_size=1)
         self.assertEqual(len(result), 2)
-        self.assertEqual(result['instanceid'].nunique(), 1)
+        self.assertEqual(result['reportnumber'].nunique(), 1)
         self.assertEqual(result.attrs['snapshot']['expected_rows'], 2)
-        self.assertIn("crashdate >= '2026-06-01T00:00:00'", query.call_args_list[1].args[0])
+        self.assertIn("eventdate >= '2026-06-01T00:00:00'", query.call_args_list[1].args[0])
         self.assertEqual(query.call_args_list[2].kwargs['page'], 2)
 
     def test_partial_people_fail_even_when_crash_is_present(self):
@@ -141,7 +142,7 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(events, ['metadata', 'count', 'page', 'count', 'metadata'])
 
     def test_missing_identity_and_wrong_stamp_fail(self):
-        for change in ({':id': None}, {'instanceid': ''},
+        for change in ({':id': None}, {'reportnumber': ''},
                        {':updated_at': None}, {':updated_at': '2026-09-18T00:00:00Z'}):
             with self.subTest(change=change):
                 frame = pd.DataFrame([{**self.row('a'), **change}])
@@ -195,8 +196,8 @@ class MetadataTests(unittest.TestCase):
 
     def test_missing_source_column_fails(self):
         data = self.metadata()
-        data['columns'] = [c for c in data['columns'] if c['fieldName'] != 'age']
-        with self.assertRaisesRegex(extract.InvalidSnapshot, 'age'):
+        data['columns'] = [c for c in data['columns'] if c['fieldName'] != 'agerange']
+        with self.assertRaisesRegex(extract.InvalidSnapshot, 'agerange'):
             extract._metadata(self.session(data))
 
     def test_new_column_warns_without_discarding_snapshot(self):
@@ -258,6 +259,74 @@ class SqlSectionsTests(unittest.TestCase):
                 code = '\n'.join(line.split('--')[0] for line in sections[n].splitlines())
                 used = set(re.findall(r'@(\w+)', code)) - {'row_count', 'error'}
                 self.assertEqual(used, {p.name for p in params})
+
+
+class HistoryProtectionTests(unittest.TestCase):
+    """The rvmt-pkmq history can't be re-extracted, so no load may touch it.
+    These pin the SQL that guarantees that; the integration suite proves it."""
+
+    def code(self, n):
+        section = pipeline.load_sql_sections('Star_Schema_ETL.sql')[n]
+        return '\n'.join(line.split('--')[0] for line in section.splitlines())
+
+    def statements(self, n, pattern):
+        return re.findall(pattern + r'.*?;', self.code(n), re.S)
+
+    def test_every_fact_delete_names_the_new_source(self):
+        deletes = self.statements(5, r'DELETE FROM crashes\.fact_crash_person')
+        self.assertEqual(len(deletes), 2)
+        for delete in deletes:
+            self.assertIn("source_dataset = '7iz8-ecuw'", delete)
+
+    def test_the_only_history_write_fills_null_neighborhoods(self):
+        updates = self.statements(5, r'UPDATE crashes\.fact_crash_person')
+        self.assertEqual(len(updates), 1)
+        self.assertRegex(updates[0], r'SET neighborhood = n\.neighborhood\s')
+        self.assertIn("f.source_dataset = 'rvmt-pkmq'", updates[0])
+        self.assertIn('f.neighborhood IS NULL', updates[0])
+
+    def test_change_detection_sees_only_new_source_crashes(self):
+        fact_crash = self.statements(5, r'CREATE TEMP TABLE fact_crash AS')[0]
+        self.assertIn("WHERE source_dataset = '7iz8-ecuw'", fact_crash)
+
+    def test_history_row_count_is_checked_inside_the_transaction(self):
+        code = self.code(5)
+        transaction = code[code.index('BEGIN TRANSACTION'):code.index('COMMIT TRANSACTION')]
+        self.assertRegex(transaction, r"ASSERT \(SELECT COUNT\(\*\) FROM crashes\.fact_crash_person "
+                                      r"WHERE source_dataset = 'rvmt-pkmq'\)\s*= history_rows")
+
+    def test_cleaning_view_leaves_out_crashes_the_history_has(self):
+        view = self.code(1)[self.code(1).index('CREATE OR REPLACE VIEW'):]
+        self.assertRegex(view, r"FROM crashes\.stg_crash_person s\s+LEFT JOIN \(\s*"
+                               r"SELECT DISTINCT localreportno FROM crashes\.fact_crash_person\s+"
+                               r"WHERE source_dataset = 'rvmt-pkmq'\s*\) h ON h\.localreportno = s\.reportnumber\s+"
+                               r"WHERE h\.localreportno IS NULL")
+
+    def test_loads_refuse_an_unlabelled_fact(self):
+        self.assertIn('WHERE source_dataset IS NULL', self.code(3))
+
+
+class DeltaFallbackTests(unittest.TestCase):
+    """A delta becomes a full load until the history is matched to the new feed."""
+
+    def run_delta(self, watermark):
+        args = Mock(delta=True, reprocess=False, allow_deletions=False)
+        lease = Mock(held=False)
+        lease.resolve_outcome.return_value = False
+        with patch.object(pipeline, 'delta_watermark', return_value=watermark), \
+             patch.object(pipeline, 'fetch', side_effect=RuntimeError('stop at fetch')) as fetch:
+            with self.assertRaisesRegex(RuntimeError, 'stop at fetch'):
+                pipeline.run_load(Mock(), Config('test-project'), lease, {}, args, None)
+        return fetch.call_args.kwargs['since']
+
+    def test_unnamed_history_forces_a_full_extract(self):
+        self.assertIsNone(self.run_delta((date(2026, 5, 26), True)))
+
+    def test_named_history_keeps_the_window(self):
+        self.assertEqual(self.run_delta((date(2026, 5, 26), False)), '2026-05-26')
+
+    def test_empty_fact_forces_a_full_extract(self):
+        self.assertIsNone(self.run_delta((None, False)))
 
 
 class RunnerTests(unittest.TestCase):

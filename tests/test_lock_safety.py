@@ -182,7 +182,7 @@ class LockSafetyTests(unittest.TestCase):
 
     def test_invalid_manifest_frame_is_rejected_before_reservation(self):
         lease, client = self.lease()
-        frame = pd.DataFrame([{'instanceid': 'crash-a'}])
+        frame = pd.DataFrame([{'reportnumber': 'crash-a'}])
         frame.attrs['snapshot'] = {'expected_rows': 1, 'publish_stamp': '2026-09-19T12:00:00Z'}
         with patch.object(lease, 'renew') as reserve:
             with self.assertRaises(ValueError):
@@ -211,7 +211,7 @@ class FailureLogSafetyTests(unittest.TestCase):
         config = Config('test-project')
         lease = pipeline.Lease(client, config, 'owner')
         lease.held = True
-        frame = pd.DataFrame([{'instanceid': 'crash-a'}])
+        frame = pd.DataFrame([{'reportnumber': 'crash-a'}])
         frame.attrs['snapshot'] = {'expected_rows': 1, 'publish_stamp': '2026-09-19T12:00:00+00:00'}
         args = SimpleNamespace(reprocess=False, delta=False, allow_deletions=False)
         def section(*args, **kwargs):

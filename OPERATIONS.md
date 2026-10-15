@@ -7,7 +7,51 @@ the ETL logic, and [README.md § The data](README.md#the-data) covers where
 the feed comes from and what its quirks are — several alerts here only make
 sense once you know the feed republishes without adding data.
 
-Deployed and verified end to end on 2026-10-02.
+Deployed and verified end to end on 2026-10-02. **Source switched on
+2026-10-15** — see the next section first.
+
+---
+
+## The source switch (2026-10-15)
+
+The 06:00 delta on 2026-10-15 failed both attempts with `403 Forbidden` on
+the first request to `rvmt-pkmq`: the city had made the dataset private. The
+alert and the watchdog both mailed, as designed, and both triggers were paused
+the same day. The replacement feed is `7iz8-ecuw`; README.md § The source
+switch has the column mapping and what the pipeline now does with it.
+
+What changes operationally:
+
+- **The history is irreplaceable.** Every row loaded from `rvmt-pkmq` is
+  frozen and no longer rebuildable from any feed. A backup copy of the fact,
+  the four dimensions and `etl_load_log` is in the dataset
+  `crashes_archive_rvmt`, taken 2026-10-15 and verified row for row.
+- **The first load must be a full one.** It matches the history to the new
+  feed and names its neighborhoods, which the ML panel needs. A scheduled
+  delta does this on its own — it falls back to a full load while the
+  history is unnamed — but running it by hand once lets you verify it.
+- **The new feed adds nothing until about 2026-10-31.** Its data stops at
+  2026-08-24, like the history, while the police department changes
+  reporting systems. Loads succeed and find nothing new until then.
+  Watchdog guard 4 (*data not advancing*, 60 days) trips from about
+  2026-10-23 and keeps mailing until new crash days arrive. That one is real.
+- **Recheck the mapping on the first new-system data.** Everything in the
+  cleaning view was measured on the history the new feed republishes. Rows
+  from the new reporting system may use other labels; Section 6's coverage
+  check lists any it doesn't recognise.
+
+### Rollout
+
+1. Run the integration suite locally (it clones production into a throwaway
+   dataset and deletes it): `python tests/integration_bigquery.py`.
+2. Push to `main`. CI runs the offline suite and repoints both jobs.
+3. Run setup and the first full load once, by hand:
+   `gcloud run jobs execute crash-etl-full --region=us-east1 --args=--setup,--full --wait`
+4. Check the run: the newest `etl_load_log` row is `succeeded` with
+   `load_mode = 'full'`; `fact_crash_person` still has 433,160 rows with
+   `source_dataset = 'rvmt-pkmq'`, and all but ~332 of their crashes have a
+   `neighborhood`.
+5. Resume both triggers (`gcloud scheduler jobs resume <name> --location=us-east1`).
 
 ---
 
@@ -252,6 +296,7 @@ region as the BigQuery dataset.
 | Secret | `socrata-app-token` | 25 bytes, no trailing newline |
 | Scheduled query | `crash-etl_watchdog` | Daily 14:00 UTC, owned by a person |
 | Dataset | `crashes` | `us-east1` |
+| Dataset | `crashes_archive_rvmt` | `us-east1`. Copy of the `rvmt-pkmq` history (fact, four dimensions, `etl_load_log`) taken 2026-10-15. Nothing writes to it |
 
 ### Identities
 
@@ -429,10 +474,10 @@ things it added have been proven rather than assumed: the alert has fired
 and delivered, and the deploy job has built and repointed twice. The local
 key is destroyed.
 
-- **Watch Saturday's 06:00 delta** — the first real load on an image built
-  by CI rather than by hand.
-- **Watch Sunday's full load** — the first exercise of the full write path in
-  the cloud, and the thing that still matters most.
+- **Roll out the source switch** — see [The source switch](#the-source-switch-2026-10-15).
+- **Watch the first load with new-system data** (expected after 2026-10-31)
+  — the first crashes the history doesn't already have, and the first rows
+  from the police department's new reporting system.
 - Optional: disable `cinci-crash-etl`, now that it is keyless and unused.
 
 Open work beyond deployment is in [TODO.md](TODO.md).
@@ -463,7 +508,9 @@ gcloud scheduler jobs pause crash-etl-delta-mon-sat --location=us-east1
 gcloud scheduler jobs pause crash-etl-full-sun --location=us-east1
 ```
 
-A rollback does not undo writes, and does not need to. The model is
-rebuildable: `--full --reprocess` re-derives every crash from the feed, so a
-bad load is recovered by fixing the code and reloading, not by restoring a
-backup.
+A rollback does not undo writes. The 7iz8-ecuw crashes are rebuildable:
+`--full --reprocess` re-derives every one of them from the feed, so a bad load
+is recovered by fixing the code and reloading. **The rvmt-pkmq history is
+not**: that feed went private on 2026-10-15, so a damaged history row can only
+come back from the `crashes_archive_rvmt` backup. No load writes to it except
+to fill `neighborhood` (see README.md, The source switch).

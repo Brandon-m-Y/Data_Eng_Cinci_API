@@ -15,6 +15,13 @@ Figures were verified 2026-10-02. The warehouse only changes when a load runs,
 and the feed has published no new crash day since 2026-08-24, so counts should
 match for a while. If one drifts, the query is still right.
 
+Since 2026-10-15 new crashes come from a different feed (`7iz8-ecuw`;
+README.md, The source switch). Its crashes have `source_dataset = '7iz8-ecuw'`
+and NULL `cpd_neighborhood`, `community_council_neighborhood`, `zip`, unit type
+and exact `age`, so questions on those columns describe the history (crashes
+through 2026-08-24). For neighborhood questions across both feeds use the
+fact's `neighborhood`; for age, `age_range`.
+
 ---
 
 ## Before you start: three traps

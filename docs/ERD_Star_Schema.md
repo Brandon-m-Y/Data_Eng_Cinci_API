@@ -106,6 +106,7 @@ fact_crash_person {
    INT64 person_profile_key FK
    STRING instanceid 
    STRING localreportno 
+   STRING source_dataset 
    STRING socrata_id 
    DATE crash_date 
    DATETIME crash_datetime 
@@ -117,16 +118,18 @@ fact_crash_person {
    INT64 is_injured 
    INT64 is_fatal 
    INT64 age 
+   STRING age_range 
+   STRING neighborhood 
    STRING socrata_version 
    TIMESTAMP socrata_updated_at 
    TIMESTAMP loaded_at 
    STRING crash_hash 
 }
 dim_location 1--0+ fact_crash_person : has
-dim_crash_type 1--0+ fact_crash_person : has
 dim_time 1--0+ fact_crash_person : has
 dim_date 1--0+ fact_crash_person : has
 dim_conditions 1--0+ fact_crash_person : has
 dim_date 1--0+ fact_crash_person : has
 dim_person_profile 1--0+ fact_crash_person : has
+dim_crash_type 1--0+ fact_crash_person : has
 ```

@@ -17,31 +17,26 @@ from Pipeline_Config import JOB_TIMEOUT_MINUTES, STAGING_TABLE, Config
 
 load_dotenv()
 
-# ':' is illegal in BigQuery column names; the '_x' suffixes are leftovers
-# from an upstream merge.
+# ':' is illegal in BigQuery column names
 RENAME = {
     ':id': 'socrata_id',
     ':version': 'socrata_version',
     ':created_at': 'socrata_created_at',
     ':updated_at': 'socrata_updated_at',
-    'address_x': 'address',
-    'latitude_x': 'latitude',
-    'longitude_x': 'longitude',
 }
 
 # Must match the stg_crash_person DDL in Star_Schema_ETL.sql section 1.
 # All STRING: typing happens in the SQL cleaning view, so a malformed value
-# ('BB' in age, '454229' in zip) lands in staging instead of failing the load.
-# dayofweek is deliberately absent — dim_date derives it.
+# lands in staging instead of failing the load. Staging holds the 7iz8-ecuw
+# payload as published; the view maps it onto the column names the star
+# schema has always used.
 STAGING_COLUMNS = [
     'socrata_id', 'socrata_version', 'socrata_created_at', 'socrata_updated_at',
-    'instanceid', 'localreportno', 'crashdate', 'datecrashreported',
-    'address', 'latitude', 'longitude', 'zip',
-    'community_council_neighborhood', 'cpd_neighborhood', 'sna_neighborhood',
-    'roadclass', 'roadclassdesc', 'crashlocation',
+    'reportnumber', 'unitno', 'eventdate', 'reportdate',
+    'address', 'latitude', 'longitude', 'snaneighborhood', 'crashlocation',
     'lightconditionsprimary', 'roadconditionsprimary', 'roadcontour', 'roadsurface',
-    'weather', 'mannerofcrash', 'crashseverity', 'crashseverityid',
-    'typeofperson', 'unittype', 'gender', 'age', 'injuries',
+    'weather', 'mannerofcrash', 'crashseverity',
+    'typeofperson', 'gender', 'agerange', 'injuries',
 ]
 SCHEMA = [bigquery.SchemaField(c, 'STRING') for c in STAGING_COLUMNS]
 

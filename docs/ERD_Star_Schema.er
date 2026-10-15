@@ -95,6 +95,7 @@ title {label: "Cincinnati crash star schema (BigQuery dataset: crashes)", size: 
     person_profile_key {label:"INT64"}
     instanceid {label:"STRING"}
     localreportno {label:"STRING"}
+    source_dataset {label:"STRING"}
     socrata_id {label:"STRING"}
     crash_date {label:"DATE"}
     crash_datetime {label:"DATETIME"}
@@ -106,14 +107,16 @@ title {label: "Cincinnati crash star schema (BigQuery dataset: crashes)", size: 
     is_injured {label:"INT64"}
     is_fatal {label:"INT64"}
     age {label:"INT64"}
+    age_range {label:"STRING"}
+    neighborhood {label:"STRING"}
     socrata_version {label:"STRING"}
     socrata_updated_at {label:"TIMESTAMP"}
     loaded_at {label:"TIMESTAMP"}
     crash_hash {label:"STRING"}
 dim_location."location_key" 1--* fact_crash_person."location_key"
-dim_crash_type."crash_type_key" 1--* fact_crash_person."crash_type_key"
 dim_time."time_key" 1--* fact_crash_person."crash_time_key"
 dim_date."date_key" 1--* fact_crash_person."crash_date_key"
 dim_conditions."conditions_key" 1--* fact_crash_person."conditions_key"
 dim_date."date_key" 1--* fact_crash_person."reported_date_key"
 dim_person_profile."person_profile_key" 1--* fact_crash_person."person_profile_key"
+dim_crash_type."crash_type_key" 1--* fact_crash_person."crash_type_key"

@@ -10,8 +10,11 @@ offline suite:
     -v "$env:APPDATA\gcloud:/home/etl/.config/gcloud:ro" \
     --entrypoint python cinci-crash-etl tests/integration_bigquery.py
 
-Takes about 30 minutes and runs 56 checks: most of the time is the five
-Socrata extracts (four delta windows and one full history). It also runs
+Takes about 35 minutes and runs 69 checks: most of the time is the five
+Socrata extracts (three delta windows and two full histories: the first
+delta after the 2026-10-15 source switch runs as a full load). Every load
+is checked against a fingerprint of the rvmt-pkmq history, which no load
+may change. It also runs
 outside the image (python tests/integration_bigquery.py) when the
 credentials and .env are in place.
 
@@ -84,6 +87,21 @@ def fact_state():
         FROM {T}.fact_crash_person""")[0]
 
 
+def owned_crashes():
+    return q(f"""SELECT COUNT(DISTINCT instanceid) AS n FROM {T}.fact_crash_person
+                 WHERE source_dataset = '7iz8-ecuw'""")[0]['n']
+
+
+def history_fingerprint():
+    """Every rvmt-pkmq row, byte for byte, apart from the one column loads may
+    fill. Any rewrite, re-hash, delete or insert of history changes it."""
+    return q(f"""
+        SELECT COUNT(*) AS n_rows,
+               BIT_XOR(FARM_FINGERPRINT(TO_JSON_STRING(t))) AS fingerprint
+        FROM (SELECT * EXCEPT (neighborhood) FROM {T}.fact_crash_person
+              WHERE source_dataset = 'rvmt-pkmq') AS t""")[0]
+
+
 def lease_row():
     return q(f"SELECT holder, current_job_id, acquired_at, heartbeat_at FROM {T}.etl_lease")[0]
 
@@ -119,6 +137,14 @@ def section5(lease, sections, window_start, sql=None, load_id=None, allow_deleti
     return dict(next(iter(job.result())))
 
 
+def changed_fact(r):
+    """Whether a Section 5 result changed the fact. Its history counts
+    (crashes_in_history, history_rows_named) are left out: a no-op delta
+    still skips every history crash in its window."""
+    return any(r[k] for k in ('crashes_new', 'crashes_changed', 'crashes_removed',
+                              'crashes_deferred', 'rows_inserted', 'rows_deleted'))
+
+
 def section3(lease, sections, window_start, publish_stamp, expected_rows=None):
     """Run Section 3 with a manifest; by default the manifest matches staging's
     current row count, so each case reaches the check it's aimed at."""
@@ -138,6 +164,7 @@ def main():
         q(f'CREATE TABLE {T}.{t} CLONE `{config.project}.{SOURCE}.{t}`')
 
     # 1. Setup migrates a production-shaped dataset
+    history_rows_before = fact_state()['n_rows']
     run_main('--setup')
     cols = {r['column_name'] for r in q(
         f"SELECT column_name FROM {T}.INFORMATION_SCHEMA.COLUMNS WHERE table_name = 'etl_load_log'")}
@@ -145,16 +172,51 @@ def main():
           {'status', 'error_message', 'fact_committed_at', 'crashes_deferred'} <= cols)
     check('setup: lease seeded and free', lease_row()['holder'] is None)
 
-    # 2. First delta re-stamps anything whose stored hash predates the current
-    # row_json (the clone carries production's hashes, which may have been
-    # computed by an older formula, and the feed may have republished since).
-    # What must hold is that it succeeds; the no-op proof is the second delta.
+    # The source switch. The clone may already be migrated (production after
+    # its own --setup) or not; either way every row must end up labelled, and
+    # every history row must have an age_range.
+    labels = q(f"""SELECT COUNTIF(source_dataset IS NULL)                       AS unlabelled,
+                          COUNTIF(source_dataset = 'rvmt-pkmq')                AS history,
+                          COUNTIF(source_dataset = 'rvmt-pkmq' AND age_range IS NULL) AS no_range,
+                          COUNTIF(source_dataset = 'rvmt-pkmq' AND age_range = 'Unknown'
+                                  AND age IS NOT NULL)                         AS misbanded
+                   FROM {T}.fact_crash_person""")[0]
+    check('setup: every fact row labelled with its source, history banded by age_range',
+          labels['unlabelled'] == 0 and labels['no_range'] == 0 and labels['misbanded'] == 0
+          and labels['history'] > 0, str(labels))
+    stg_cols = {r['column_name'] for r in q(
+        f"SELECT column_name FROM {T}.INFORMATION_SCHEMA.COLUMNS WHERE table_name = 'stg_crash_person'")}
+    check('setup: staging rebuilt for 7iz8-ecuw',
+          {'reportnumber', 'agerange', 'snaneighborhood'} <= stg_cols and 'instanceid' not in stg_cols,
+          str(sorted(stg_cols)))
+    history = history_fingerprint()
+    check('setup: labelling added no rows', fact_state()['n_rows'] == history_rows_before)
+
+    # 2. The first delta finds the history never matched to 7iz8-ecuw, so it
+    # runs as a full load: that names the history's neighborhoods and adds
+    # the crashes rvmt-pkmq never had (311 at the switch). It also re-stamps
+    # any 7iz8-ecuw crash in a clone of a production that already loaded
+    # some. What must hold is that it succeeds and the history is untouched;
+    # the no-op proof is the second delta.
     run_main('--delta')
     first = latest_log()
-    check('delta: first load against a production clone succeeds',
-          first['status'] == 'succeeded' and first['fact_committed_at'] is not None,
-          f"new {first['crashes_new']}, changed {first['crashes_changed']}, "
+    check('delta: first load after the switch runs as a full load and succeeds',
+          first['status'] == 'succeeded' and first['fact_committed_at'] is not None
+          and first['load_mode'] == 'full' and first['window_start'] is None,
+          f"mode {first['load_mode']}, new {first['crashes_new']}, changed {first['crashes_changed']}, "
           f"removed {first['crashes_removed']}, publish {first['socrata_updated_at']}")
+    check('history: untouched by the first full load', history_fingerprint() == history,
+          f'{history} -> {history_fingerprint()}')
+    named = q(f"""SELECT COUNT(DISTINCT instanceid)                                  AS crashes,
+                         COUNT(DISTINCT IF(neighborhood IS NOT NULL, instanceid, NULL)) AS named
+                  FROM {T}.fact_crash_person WHERE source_dataset = 'rvmt-pkmq'""")[0]
+    check('history: neighborhoods named from the new feed for all but a few hundred crashes',
+          named['crashes'] - named['named'] < 1000, str(named))
+    check('new feed: crashes the history lacks were added', 0 < owned_crashes(), str(owned_crashes()))
+    overlap = q(f"""SELECT COUNT(*) AS n FROM (
+                      SELECT localreportno FROM {T}.fact_crash_person
+                      GROUP BY localreportno HAVING COUNT(DISTINCT source_dataset) > 1)""")[0]['n']
+    check('new feed: no crash is in the fact from both sources', overlap == 0, str(overlap))
 
     # Now the fact and the feed agree, so a second delta must change nothing.
     # This is the real hash check: the view's row_json reproduces the hashes
@@ -163,9 +225,10 @@ def main():
     run_main('--delta')
     log = latest_log()
     check('delta: no-op on unchanged data (view row_json hashes = stored hashes)',
-          (log['crashes_new'], log['crashes_changed'], log['crashes_removed']) == (0, 0, 0),
-          f"new {log['crashes_new']}, changed {log['crashes_changed']}, removed {log['crashes_removed']}, "
-          f"publish {log['socrata_updated_at']}")
+          (log['crashes_new'], log['crashes_changed'], log['crashes_removed']) == (0, 0, 0)
+          and log['load_mode'] == 'delta' and log['window_start'] is not None,
+          f"mode {log['load_mode']}, new {log['crashes_new']}, changed {log['crashes_changed']}, "
+          f"removed {log['crashes_removed']}, publish {log['socrata_updated_at']}")
     check('delta: log row succeeded with fact_committed_at',
           log['status'] == 'succeeded' and log['fact_committed_at'] is not None)
     check('delta: fact unchanged', fact_state() == before, str(fact_state()))
@@ -210,7 +273,8 @@ def main():
           str(cellwise))
 
     sections = rp.load_sql_sections(rp.SQL_FILE, config)
-    window_start = rp.delta_watermark(client, config)
+    window_start, history_unnamed = rp.delta_watermark(client, config)
+    check('delta: watermark sees the history named', not history_unnamed)
 
     # 3. Lease
     set_lease('someone-else', 10)
@@ -273,7 +337,7 @@ def main():
         cases = [
             ('one person per crash kept (crash count intact)',
              f'DELETE FROM {T}.stg_crash_person WHERE socrata_id NOT IN '
-             f'(SELECT MIN(socrata_id) FROM {T}.stg_crash_person GROUP BY instanceid)', 'Refusing to load'),
+             f'(SELECT MIN(socrata_id) FROM {T}.stg_crash_person GROUP BY reportnumber)', 'Refusing to load'),
             ('NULL publish stamp',
              f'UPDATE {T}.stg_crash_person SET socrata_updated_at = NULL WHERE socrata_id = '
              f'(SELECT MIN(socrata_id) FROM {T}.stg_crash_person)', 'without :id'),
@@ -281,7 +345,7 @@ def main():
              f"UPDATE {T}.stg_crash_person SET socrata_updated_at = '2099-01-01T00:00:00.000Z' "
              f'WHERE socrata_id = (SELECT MIN(socrata_id) FROM {T}.stg_crash_person)', 'more than one'),
             ('same :id, different content',
-             f"INSERT INTO {T}.stg_crash_person SELECT * REPLACE ('999' AS age) FROM {T}.stg_crash_person "
+             f"INSERT INTO {T}.stg_crash_person SELECT * REPLACE ('999' AS agerange) FROM {T}.stg_crash_person "
              f'WHERE socrata_id = (SELECT MIN(socrata_id) FROM {T}.stg_crash_person)', 'two different contents'),
             ("'|' in a natural-key value",
              f"UPDATE {T}.stg_crash_person SET address = CONCAT(IFNULL(address, ''), ' | X') "
@@ -299,7 +363,7 @@ def main():
         except Exception as e:
             check('section 3: accepts an exact duplicate row (page overlap)', False, str(e)[:200])
         r = section5(lease, sections, window_start)
-        check('section 5: exact duplicate staged row changes nothing', not any(r.values()), str(r))
+        check('section 5: exact duplicate staged row changes nothing', not changed_fact(r), str(r))
 
         # The decisive hash test. The city fuzzes each row's coordinates
         # independently and redraws them on every publish, so a republish that
@@ -311,7 +375,7 @@ def main():
               WHERE latitude IS NOT NULL AND longitude IS NOT NULL""")
         r = section5(lease, sections, window_start)
         check('section 5: a republish that only re-fuzzes coordinates changes nothing',
-              not any(r.values()), str(r))
+              not changed_fact(r), str(r))
 
         q(restore)
         q(f'DROP TABLE {T}.stg_backup')
@@ -326,10 +390,42 @@ def main():
                      'dim_conditions has a duplicate')
         q(f'DELETE FROM {T}.dim_conditions WHERE conditions_key > 1000000')
 
-        # 6. Section 5: repair, deferral, rollback
+        # 6. History is frozen: a delta neither repairs a tampered history
+        # crash in its window nor deletes one the feed doesn't have.
+        hist_crash = q(f"""
+            SELECT f.instanceid FROM {T}.fact_crash_person f
+            JOIN {T}.stg_crash_person s ON s.reportnumber = f.localreportno
+            WHERE f.source_dataset = 'rvmt-pkmq' AND f.crash_date >= @w
+            ORDER BY f.instanceid LIMIT 1""", [rp.param('w', 'DATE', window_start)])[0]['instanceid']
+        q(f"UPDATE {T}.fact_crash_person SET crash_hash = 'tampered-history' WHERE instanceid = '{hist_crash}'")
+        q(f"""INSERT INTO {T}.fact_crash_person
+              SELECT * REPLACE ('FAKE-HISTORY' AS instanceid, 'FAKE-HISTORY' AS localreportno,
+                                'fake-history-row' AS socrata_id)
+              FROM {T}.fact_crash_person WHERE instanceid = '{hist_crash}' LIMIT 1""")
+        before = fact_state()
+        r = section5(lease, sections, window_start)
+        kept = q(f"""SELECT COUNTIF(crash_hash = 'tampered-history') AS tampered,
+                            COUNTIF(instanceid = 'FAKE-HISTORY')      AS fake
+                     FROM {T}.fact_crash_person""")[0]
+        check('section 5: a delta leaves history alone (no repair, no delete)',
+              not changed_fact(r)
+              and kept['tampered'] > 0 and kept['fake'] == 1 and fact_state() == before,
+              f'{r}; {kept}')
+        q(f"DELETE FROM {T}.fact_crash_person WHERE instanceid = 'FAKE-HISTORY'")
+        q(f"""UPDATE {T}.fact_crash_person SET crash_hash = (
+                SELECT ANY_VALUE(crash_hash) FROM `{config.project}.{SOURCE}.fact_crash_person`
+                WHERE instanceid = '{hist_crash}')
+              WHERE instanceid = '{hist_crash}'""")
+        check('history: restored after the tamper test', history_fingerprint() == history)
+
+        # 7. Section 5: repair, deferral, rollback, on crashes the load owns
+        # whose rows all sit inside the window (so none is deferred)
         staged = q(f"""
-            SELECT instanceid, COUNT(*) AS n FROM {T}.stg_crash_person
-            GROUP BY instanceid HAVING n >= 2 ORDER BY instanceid LIMIT 6""")
+            SELECT instanceid, COUNT(*) AS n FROM {T}.fact_crash_person
+            WHERE source_dataset = '7iz8-ecuw'
+            GROUP BY instanceid HAVING n >= 2 AND MIN(crash_date) >= @w
+            ORDER BY instanceid LIMIT 6""", [rp.param('w', 'DATE', window_start)])
+        check('section 5: the window holds six multi-person crashes the load owns', len(staged) == 6, str(staged))
         a, b, c, e_, f_, g = [s['instanceid'] for s in staged]
         q(f"DELETE FROM {T}.fact_crash_person WHERE socrata_id = "
           f"(SELECT MIN(socrata_id) FROM {T}.fact_crash_person WHERE instanceid = '{a}')")
@@ -343,7 +439,7 @@ def main():
               (r['crashes_new'], r['crashes_changed'], r['crashes_removed'], r['crashes_deferred']) == (0, 3, 1, 0),
               str(r))
         r = section5(lease, sections, window_start)
-        check('section 5: rerun after repair is a no-op', not any(r.values()), str(r))
+        check('section 5: rerun after repair is a no-op', not changed_fact(r), str(r))
 
         # Deletion cap: 101 crashes gone from the feed stops the load ...
         q(f"""INSERT INTO {T}.fact_crash_person
@@ -405,11 +501,11 @@ def main():
         r = section5(lease, sections, window_start)
         check('section 5: the next load repairs it', r['crashes_changed'] == 1, str(r))
         r = section5(lease, sections, window_start)
-        check('section 5: final state is a no-op', not any(r.values()), str(r))
+        check('section 5: final state is a no-op', not changed_fact(r), str(r))
     finally:
         lease.release()
 
-    # 7. A failure after the fact commit is logged as failed, fact commit kept
+    # 8. A failure after the fact commit is logged as failed, fact commit kept
     # gettempdir(), not '/tmp': this suite also runs outside the Linux image
     broken = Path(tempfile.gettempdir()) / 'ML_Crash_Panel_broken.sql'
     text = Path(rp.PANEL_SQL_FILE).read_text(encoding='utf-8')
@@ -442,15 +538,18 @@ def main():
     check('section 11: a succeeded load survives a late failure write, without a second row',
           len(rows) == 1 and rows[0]['status'] == 'succeeded', str(rows))
 
-    # 8. --full --reprocess rewrites every crash, then a delta is a no-op again
+    # 9. --full --reprocess rewrites every crash the load owns -- and none of
+    # the history -- then a delta is a no-op again
     before = fact_state()
     run_main('--full', '--reprocess')
     log = latest_log()
-    check('reprocess: rewrites every crash and succeeds',
+    check('reprocess: rewrites every 7iz8-ecuw crash and succeeds',
           log['status'] == 'succeeded' and log['load_mode'] == 'reprocess'
-          and log['crashes_changed'] + log['crashes_new'] == fact_state()['n_crashes'],
+          and log['crashes_changed'] + log['crashes_new'] == owned_crashes(),
           f"changed {log['crashes_changed']}, new {log['crashes_new']}, removed {log['crashes_removed']}; "
-          f"fact before {before}, after {fact_state()}")
+          f"owned {owned_crashes()}; fact before {before}, after {fact_state()}")
+    check('history: untouched by --full --reprocess', history_fingerprint() == history,
+          f'{history} -> {history_fingerprint()}')
 
     # Every crash has now been rewritten, so distance_to_cbd_m must be fully
     # populated -- this is the state production reaches after --setup plus
@@ -486,11 +585,18 @@ def main():
           near_far['cbd_median_m'] < 2000 < near_far['westwood_median_m'], str(near_far))
 
     # The same orientation at cell grain: the nearest cell to the anchor has
-    # to be the central business district itself.
-    nearest = q(f"""SELECT cell_id, ANY_VALUE(distance_to_cbd_km) AS km
-                    FROM {T}.ml_crash_panel GROUP BY cell_id ORDER BY km LIMIT 1""")[0]
-    check('reprocess: the panel cell nearest the anchor is the CBD',
-          nearest['cell_id'] == 'C. B. D. / RIVERFRONT' and nearest['km'] < 1.0, str(nearest))
+    # to be the central business district itself ('Downtown' in the SNA
+    # scheme the panel uses since the source switch).
+    nearest = q(f"""SELECT cell_scheme, cell_id, ANY_VALUE(distance_to_cbd_km) AS km
+                    FROM {T}.ml_crash_panel GROUP BY cell_scheme, cell_id ORDER BY km LIMIT 1""")[0]
+    check('reprocess: the panel cell nearest the anchor is downtown',
+          nearest['cell_scheme'] == 'neighborhood' and nearest['cell_id'] == 'DOWNTOWN'
+          and nearest['km'] < 1.0, str(nearest))
+
+    # The panel must keep counting past the history: with the default scheme
+    # both sources land in cells.
+    span = q(f"""SELECT MAX(day) AS last_day, SUM(crashes) AS crashes FROM {T}.ml_crash_panel""")[0]
+    check('panel: built on the neighborhood scheme, with crashes in it', span['crashes'] > 100000, str(span))
 
     run_main('--delta')
     log = latest_log()

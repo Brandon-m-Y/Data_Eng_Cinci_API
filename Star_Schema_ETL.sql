@@ -1,6 +1,8 @@
 -- ============================================================
 -- Cincinnati Traffic Crash Reports (CPD) — Star Schema, BigQuery
--- Source: Socrata dataset rvmt-pkmq (data.cincinnati-oh.gov)
+-- Source: Socrata dataset 7iz8-ecuw (data.cincinnati-oh.gov). History up
+--         to 2026-10-14 came from rvmt-pkmq, which the city made private on
+--         2026-10-15; see TWO SOURCES below.
 -- Manual (state-anchored) surrogate key pattern
 -- Run order: Section 10, then 1, 2, 7 on --setup (safe to rerun);
 --            Sections 3, 4, 5, 6, 9 every load (--delta or --full);
@@ -15,19 +17,42 @@
 
 
 -- ============================================================
+-- TWO SOURCES, ONE FACT. fact_crash_person.source_dataset names the feed
+-- each crash came from:
+--   'rvmt-pkmq'  the history: 221,289 crashes through 2026-08-24, loaded
+--                until 2026-10-14. That feed is gone, so these rows are
+--                FROZEN. No load rewrites, re-hashes or deletes them, and
+--                --reprocess can no longer rebuild them: these tables are the
+--                only copy (crashes_archive_rvmt holds a backup taken
+--                2026-10-15). A load's one write to them is filling
+--                `neighborhood` once (Section 5).
+--   '7iz8-ecuw'  everything since. This feed republishes the whole history
+--                too, so a staged crash is loaded only when its reportnumber
+--                is not already a history localreportno. They are the same
+--                police report number: 220,957 of the 221,289 history
+--                crashes match one in the new feed, and the two feeds'
+--                leftovers (332 and 311) don't match each other on time and
+--                block address, so they are different crashes, not re-keyed
+--                ones.
+-- 7iz8-ecuw publishes fewer columns. Its crashes carry NULL for zip,
+-- community council, CPD neighborhood, road class, unit type, severity id
+-- and exact age; the cleaning view (Section 1) maps the rest.
+--
 -- GRAIN: one row per PERSON/UNIT involved in one crash.
--- Verified against the live API (433,160 rows):
---   :id            433,160 distinct -> unique per person-row, but only within
---                                     one Socrata publish: every republish
---                                     regenerates all :id and :version values
---   instanceid     221,289 distinct -> crash level (~1.96 people per crash);
---                                     stable across publishes, so Section 5
---                                     replaces the fact crash by crash on it
---   localreportno  221,289 distinct -> crash level, 1:1 with instanceid
+-- Measured on 7iz8-ecuw (449,817 rows, 2026-10-15):
+--   :id            unique per person-row, but only within one Socrata
+--                  publish: every republish regenerates all :id and :version
+--                  values (measured on rvmt-pkmq; same behaviour assumed)
+--   reportnumber   221,268 distinct -> crash level (~2.03 rows per crash).
+--                  This feed has no instanceid, so its crashes use the
+--                  report number as instanceid: Section 5 replaces the fact
+--                  crash by crash on it. History instanceids are GUIDs and
+--                  can't collide with it.
 -- instanceid and localreportno are therefore degenerate dimensions.
--- Staging must receive the UNdeduped feed — deduping on instanceid collapses
--- the grain to one row per crash and throws away every passenger and
--- pedestrian. Section 6's persons_per_crash (~1.96) catches it if it happens.
+-- Staging must receive the UNdeduped feed — deduping on reportnumber
+-- collapses the grain to one row per crash and throws away every passenger
+-- and pedestrian. Section 6's persons_per_crash catches it if it happens.
+-- The one dedupe that IS applied: a driver row repeated exactly (Section 5).
 --
 -- TWO CODING ERAS: Ohio re-coded its crash report around 2019 and the feed
 -- mixes both vintages in the same columns. The numeric prefix is not stable:
@@ -35,7 +60,9 @@
 --                    outcome — the old scale runs fatal->none, the new one
 --                    none->fatal
 --   crashseverityid  '1','2','3' (old) alongside '201901'..'201905' (new)
+--                    (rvmt-pkmq only; 7iz8-ecuw dates the era instead)
 --   unittype         '03 - MID SIZE' (old) vs '03 - SPORT UTILITY VEHICLE' (new)
+--                    (rvmt-pkmq only)
 -- So every dimension is keyed on the RAW string and carries a canonical
 -- attribute that reconciles the eras. Group by the canonical column; never
 -- order by the raw prefix.
@@ -49,30 +76,34 @@
 -- logic in Sections 4 and 5, not by the engine.
 -- ============================================================
 
--- Staging: raw Socrata payload, all STRING because the JSON API returns every
--- column as a string. Typing happens in the cleaning view below, so a malformed
--- value can't fail the load — it lands, and SAFE_CAST quarantines it where
--- Section 6 can count it. ':' is illegal in BigQuery column names, so the
--- Socrata system fields are renamed; the '_x' merge leftovers are dropped.
--- `dayofweek` is not staged: dim_date derives it.
+-- Staging: raw 7iz8-ecuw payload, all STRING because the JSON API returns
+-- every column as a string. Typing happens in the cleaning view below, so a
+-- malformed value can't fail the load — it lands, and SAFE_CAST quarantines
+-- it where Section 6 can count it. ':' is illegal in BigQuery column names,
+-- so the Socrata system fields are renamed.
+--
+-- Staging only ever holds the last extract, so a table still shaped for
+-- rvmt-pkmq is dropped and recreated rather than migrated.
+IF NOT EXISTS (
+  SELECT 1 FROM crashes.INFORMATION_SCHEMA.COLUMNS
+  WHERE table_name = 'stg_crash_person' AND column_name = 'reportnumber'
+) THEN
+  DROP TABLE IF EXISTS crashes.stg_crash_person;
+END IF;
+
 CREATE TABLE IF NOT EXISTS crashes.stg_crash_person (
   socrata_id                      STRING,   -- :id
   socrata_version                 STRING,   -- :version
   socrata_created_at              STRING,   -- :created_at
   socrata_updated_at              STRING,   -- :updated_at (see watermark note, Section 3)
-  instanceid                      STRING,
-  localreportno                   STRING,
-  crashdate                       STRING,
-  datecrashreported               STRING,
-  address                         STRING,   -- address_x
-  latitude                        STRING,   -- latitude_x
-  longitude                       STRING,   -- longitude_x
-  zip                             STRING,
-  community_council_neighborhood  STRING,
-  cpd_neighborhood                STRING,
-  sna_neighborhood                STRING,
-  roadclass                       STRING,
-  roadclassdesc                   STRING,
+  reportnumber                    STRING,   -- police report number: the crash key
+  unitno                          STRING,   -- vehicle/unit within the crash
+  eventdate                       STRING,   -- when the crash happened
+  reportdate                      STRING,   -- when it was reported
+  address                         STRING,   -- exact house number; the view masks it to the block
+  latitude                        STRING,
+  longitude                       STRING,
+  snaneighborhood                 STRING,   -- the city's current SNA neighborhoods
   crashlocation                   STRING,
   lightconditionsprimary          STRING,
   roadconditionsprimary           STRING,
@@ -80,12 +111,10 @@ CREATE TABLE IF NOT EXISTS crashes.stg_crash_person (
   roadsurface                     STRING,
   weather                         STRING,
   mannerofcrash                   STRING,
-  crashseverity                   STRING,
-  crashseverityid                 STRING,
+  crashseverity                   STRING,   -- label only, no code: 'Property Damage Only'
   typeofperson                    STRING,
-  unittype                        STRING,
   gender                          STRING,
-  age                             STRING,
+  agerange                        STRING,   -- '15 or Under', '16-19', ... '75+', 'Unknown'
   injuries                        STRING
 );
 
@@ -186,7 +215,10 @@ CREATE TABLE IF NOT EXISTS crashes.dim_crash_type (
 );
 
 -- Junk dimension. Age is banded here; the raw integer stays on the fact so it
--- can still be averaged.
+-- can still be averaged. age_band is each source's own banding: exact-age
+-- bands for rvmt-pkmq, the published ranges for 7iz8-ecuw. They agree from
+-- 25 up and differ below it (16-20/21-24 vs 16-19/20-24); the fact's
+-- age_range is the one banding both share.
 CREATE TABLE IF NOT EXISTS crashes.dim_person_profile (
   person_profile_key    INT64  NOT NULL,
   person_profile_nk     STRING NOT NULL,
@@ -215,8 +247,9 @@ CREATE TABLE IF NOT EXISTS crashes.fact_crash_person (
   conditions_key       INT64  NOT NULL,
   crash_type_key       INT64  NOT NULL,
   person_profile_key   INT64  NOT NULL,
-  instanceid           STRING NOT NULL,     -- degenerate dimension
-  localreportno        STRING,              -- degenerate dimension
+  instanceid           STRING NOT NULL,     -- degenerate dimension: the crash key (= reportnumber for 7iz8-ecuw)
+  localreportno        STRING,              -- degenerate dimension: the police report number
+  source_dataset       STRING,              -- 'rvmt-pkmq' (frozen history) | '7iz8-ecuw' (see TWO SOURCES)
   socrata_id           STRING NOT NULL,     -- Socrata row id; regenerated on every republish, NOT a stable key
   crash_date           DATE,                -- carried into the fact for partitioning
   crash_datetime       DATETIME,
@@ -233,6 +266,19 @@ CREATE TABLE IF NOT EXISTS crashes.fact_crash_person (
   is_injured           INT64  NOT NULL,     -- injury_severity_rank >= 2 (possible injury or worse)
   is_fatal             INT64  NOT NULL,     -- injury_severity_rank  = 5
   age                  INT64,               -- raw, validated 0-110; NULL for 'BB', 'NN', 913, ...
+                                            -- rvmt-pkmq only: 7iz8-ecuw publishes ranges
+  -- '00-15' '16-19' '20-24' '25-34' '35-44' '45-54' '55-64' '65-74' '75+'
+  -- 'Unknown', which sort as written. 7iz8-ecuw's own ranges, and the history
+  -- banded the same way from its exact age (Section 1), so it is the one age
+  -- band that means the same thing for both sources.
+  age_range            STRING,
+  -- The SNA neighborhood as 7iz8-ecuw names it, for crashes from BOTH
+  -- sources: history crashes are matched to the new feed by report number
+  -- (Section 5). dim_location's neighborhood columns are rvmt-pkmq's own
+  -- schemes and are NULL for 7iz8-ecuw crashes, so this is the only
+  -- neighborhood that spans the whole fact. NULL for the 332 history crashes
+  -- the new feed doesn't have.
+  neighborhood         STRING,
   socrata_version      STRING,              -- ETL audit
   socrata_updated_at   TIMESTAMP,           -- ETL audit
   loaded_at            TIMESTAMP NOT NULL,  -- ETL audit
@@ -310,6 +356,40 @@ IF (SELECT COUNT(*) FROM crashes.INFORMATION_SCHEMA.COLUMNS
     ADD COLUMN IF NOT EXISTS fact_committed_at TIMESTAMP;
 END IF;
 
+-- The source switch (2026-10-15)
+IF (SELECT COUNT(*) FROM crashes.INFORMATION_SCHEMA.COLUMNS
+    WHERE table_name = 'fact_crash_person'
+      AND column_name IN ('source_dataset', 'age_range', 'neighborhood')) < 3 THEN
+  ALTER TABLE crashes.fact_crash_person
+    ADD COLUMN IF NOT EXISTS source_dataset STRING,
+    ADD COLUMN IF NOT EXISTS age_range      STRING,
+    ADD COLUMN IF NOT EXISTS neighborhood   STRING;
+END IF;
+
+-- Label the history. Section 5 sets source_dataset on every row it inserts,
+-- so a row without one predates the column and came from rvmt-pkmq. Its
+-- age_range comes from the exact age only that feed published, cut at
+-- 7iz8-ecuw's boundaries (checked 2026-10-15 on 34,798 single-person crashes
+-- in both feeds: every exact age fell inside its published range). Section 3
+-- refuses to load while any row is unlabelled.
+IF EXISTS (SELECT 1 FROM crashes.fact_crash_person WHERE source_dataset IS NULL) THEN
+  UPDATE crashes.fact_crash_person
+  SET source_dataset = 'rvmt-pkmq',
+      age_range = CASE
+        WHEN age IS NULL THEN 'Unknown'
+        WHEN age < 16    THEN '00-15'
+        WHEN age < 20    THEN '16-19'
+        WHEN age < 25    THEN '20-24'
+        WHEN age < 35    THEN '25-34'
+        WHEN age < 45    THEN '35-44'
+        WHEN age < 55    THEN '45-54'
+        WHEN age < 65    THEN '55-64'
+        WHEN age < 75    THEN '65-74'
+        ELSE '75+'
+      END
+  WHERE source_dataset IS NULL;
+END IF;
+
 -- Cleaning view: the single place normalization happens. Sections 4 and 5
 -- both read it, so a dimension's natural key is computed identically when the
 -- dimension is built and when the fact looks it up. Duplicating these CASE
@@ -317,55 +397,79 @@ END IF;
 -- After changing anything here (or a derived column in Section 4), run
 -- Run_Pipeline.py --full --reprocess: the crash hash covers raw values only,
 -- so an ordinary load would leave unchanged crashes and existing dimension
--- members on the old logic.
+-- members on the old logic. That rewrites the 7iz8-ecuw crashes only; the
+-- rvmt-pkmq history was built by the earlier version of this view, and its
+-- feed is gone, so it keeps the logic it was loaded with.
+--
+-- The view reads 7iz8-ecuw staging and returns it under the column names the
+-- star schema has always used, with NULL for what this feed doesn't publish.
+-- It returns only crashes this load owns: a staged crash already in the
+-- history (same report number) is left out here, so neither the dimensions
+-- nor the fact ever see it. Section 5 reads staging directly for the one
+-- thing it takes from those crashes, their neighborhood. The filter is a
+-- join, not NOT EXISTS: Sections 4 and 5 put their own subqueries and window
+-- functions on top of this view, and BigQuery refuses a correlated subquery
+-- it can't de-correlate in some of those compositions.
 CREATE OR REPLACE VIEW crashes.vw_stg_crash_person_clean AS
-WITH typed AS (
+WITH owned AS (
+  SELECT
+    s.*,
+    NULLIF(REGEXP_REPLACE(UPPER(TRIM(s.address)), r'\s+', ' '), '') AS address_norm
+  FROM crashes.stg_crash_person s
+  LEFT JOIN (
+    SELECT DISTINCT localreportno FROM crashes.fact_crash_person
+    WHERE source_dataset = 'rvmt-pkmq'
+  ) h ON h.localreportno = s.reportnumber
+  WHERE h.localreportno IS NULL
+),
+typed AS (
   SELECT
     -- Section 5's change-detection input: every raw staged column except the
     -- ones the publisher regenerates. Built from the staging columns before
-    -- any cast or cleanup, with the same field names and order the stored
-    -- crash_hash values were computed from, so this column must not change
-    -- unless every crash is meant to be rewritten.
+    -- any cast or cleanup, so it changes only when the published content
+    -- does. Changing its fields or their order makes every 7iz8-ecuw crash
+    -- look changed once. The history's stored hashes came from rvmt-pkmq's
+    -- columns and are never compared again.
     --
     -- Excluded, and why:
     --   :id, :version, :created_at, :updated_at  Socrata system fields, new
     --     on every publish.
     --   latitude, longitude  The city fuzzes each ROW's coordinates
-    --     independently for privacy and re-randomizes them on every publish,
-    --     so they cannot witness a content change. Evidence, measured
-    --     2026-10-01: a crash's own person rows sit a median 113 m apart
-    --     (p99 236 m, max 280 m) within a single publish, and 163,056 of
+    --     independently for privacy and re-randomized them on every rvmt-pkmq
+    --     publish, so they cannot witness a content change. Evidence, measured
+    --     on rvmt-pkmq 2026-10-01: a crash's own person rows sit a median 113 m
+    --     apart (p99 236 m, max 280 m) within a single publish, and 163,056 of
     --     163,107 multi-row crashes disagree. Across the 09-19 and 10-01
     --     publishes, 3,317 of 3,317 crashes in the delta window differ when
     --     coordinates are hashed and 3 of 3,317 when they are not -- hashing
     --     them rewrites the whole window on every republish and empties
-    --     etl_load_log.crashes_changed of meaning. The coordinates are still
+    --     etl_load_log.crashes_changed of meaning. 7iz8-ecuw's coordinates are
+    --     fuzzed too (a median 79 m from rvmt-pkmq's for the same crash), so
+    --     the same rule holds until a republish shows otherwise. They are still
     --     loaded and stored on the fact; they just don't decide whether a
     --     crash is rewritten, and a crash rewritten for another reason picks
     --     up the current ones. Block-level location lives in address and the
-    --     neighborhood columns, which are published once per crash and are
-    --     byte-identical across rows and publishes, and those ARE hashed.
+    --     neighborhood, and those ARE hashed.
     TO_JSON_STRING(STRUCT(
-      instanceid, localreportno, crashdate, datecrashreported,
-      address, zip,
-      community_council_neighborhood, cpd_neighborhood, sna_neighborhood,
-      roadclass, roadclassdesc, crashlocation,
+      reportnumber, unitno, eventdate, reportdate, address, snaneighborhood, crashlocation,
       lightconditionsprimary, roadconditionsprimary, roadcontour, roadsurface, weather,
-      mannerofcrash, crashseverity, crashseverityid,
-      typeofperson, unittype, gender, age, injuries
+      mannerofcrash, crashseverity, typeofperson, gender, agerange, injuries
     )) AS row_json,
     socrata_id,
     socrata_version,
     SAFE_CAST(socrata_updated_at AS TIMESTAMP)  AS socrata_updated_at,
-    instanceid,
-    localreportno,
-    SAFE_CAST(crashdate         AS DATETIME)    AS crash_datetime,
-    SAFE_CAST(datecrashreported AS DATETIME)    AS reported_datetime,
+    '7iz8-ecuw'                                 AS source_dataset,
+    -- No instanceid in this feed: the report number is the crash key
+    reportnumber                                AS instanceid,
+    reportnumber                                AS localreportno,
+    SAFE_CAST(eventdate  AS DATETIME)           AS crash_datetime,
+    SAFE_CAST(reportdate AS DATETIME)           AS reported_datetime,
 
-    -- Raw coded columns: stable natural keys and the audit trail
+    -- Raw coded columns: stable natural keys and the audit trail. The two
+    -- this feed doesn't publish are NULL under the names the dimensions use.
     lightconditionsprimary, roadconditionsprimary, roadcontour, roadsurface, weather,
-    mannerofcrash, crashseverity, crashseverityid, crashlocation,
-    typeofperson, unittype, gender, injuries,
+    mannerofcrash, crashseverity, CAST(NULL AS STRING) AS crashseverityid, crashlocation,
+    typeofperson, CAST(NULL AS STRING) AS unittype, gender, injuries,
 
     -- Labels with the leading code stripped ('3 - DUSK' -> 'DUSK'). Regex on
     -- the prefix rather than SPLIT(x, ' - '), because some labels contain
@@ -379,35 +483,54 @@ WITH typed AS (
     UPPER(TRIM(REGEXP_REPLACE(mannerofcrash,          r'^\s*\d+\s*-\s*', ''))) AS manner_lbl,
     UPPER(TRIM(REGEXP_REPLACE(crashseverity,          r'^\s*\d+\s*-\s*', ''))) AS severity_lbl,
     UPPER(TRIM(REGEXP_REPLACE(crashlocation,          r'^\s*\d+\s*-\s*', ''))) AS crashloc_lbl,
-    UPPER(TRIM(REGEXP_REPLACE(unittype,               r'^\s*\d+\s*-\s*', ''))) AS unit_lbl,
+    CAST(NULL AS STRING)                                                         AS unit_lbl,
     UPPER(TRIM(REGEXP_REPLACE(injuries,               r'^\s*\d+\s*-\s*', ''))) AS injury_lbl,
     UPPER(TRIM(REGEXP_REPLACE(typeofperson,           r'^\s*[A-Z]\s*-\s*', ''))) AS person_lbl,
     UPPER(TRIM(REGEXP_REPLACE(gender,                 r'^\s*[A-Z]\s*-\s*', ''))) AS gender_lbl,
 
-    NULLIF(TRIM(address), '')                                        AS address,
+    -- Block level, the form the history has: '1610 Joseph St' -> '16XX JOSEPH ST'.
+    -- 7iz8-ecuw publishes the exact house number; rvmt-pkmq published the
+    -- block, and dim_location groups by it. Only the first token is masked:
+    -- all digits loses its last two ('6' -> 'X'), anything else its last
+    -- digit ('I75' -> 'I7X', '0.2' -> '0.X'). Measured 2026-10-15 on the
+    -- 220,957 crashes in both feeds: reproduces rvmt-pkmq's address for
+    -- 99.94%; the other 126 are mostly crashes whose address really differs.
+    CASE
+      WHEN address_norm IS NULL OR address_norm = 'NOT APPLICABLE OR UNKNOWN' THEN NULL
+      WHEN REGEXP_CONTAINS(address_norm, r'^\d\d+( |$)')
+        THEN REGEXP_REPLACE(address_norm, r'^(\d*)\d\d( |$)', r'\1XX\2')
+      WHEN REGEXP_CONTAINS(address_norm, r'^\d( |$)')
+        THEN REGEXP_REPLACE(address_norm, r'^\d', 'X')
+      ELSE REGEXP_REPLACE(address_norm, r'^(\S*)\d([^\s\d]*)( |$)', r'\1X\2\3')
+    END                                                              AS address,
     -- Outside Hamilton County = geocoding failure, not a real location
     -- Hamilton County bounds, applied to the PAIR. Half a coordinate is not
     -- a location: it can't be mapped, measured or joined, and it reads as
-    -- present to anything that checks one axis. 176 rows of 433K keep one
-    -- axis after the bounds check (140 longitude-only, 36 latitude-only);
-    -- both axes go together so a row either has a usable point or none.
+    -- present to anything that checks one axis. On rvmt-pkmq 176 rows of
+    -- 433K kept one axis after the bounds check (140 longitude-only, 36
+    -- latitude-only); both axes go together so a row has a usable point or none.
     CASE WHEN SAFE_CAST(latitude  AS FLOAT64) BETWEEN  38.9 AND  39.4
           AND SAFE_CAST(longitude AS FLOAT64) BETWEEN -84.9 AND -84.2
          THEN SAFE_CAST(latitude  AS FLOAT64) END                    AS latitude,
     CASE WHEN SAFE_CAST(latitude  AS FLOAT64) BETWEEN  38.9 AND  39.4
           AND SAFE_CAST(longitude AS FLOAT64) BETWEEN -84.9 AND -84.2
          THEN SAFE_CAST(longitude AS FLOAT64) END                    AS longitude,
-    -- Feed contains '454229', '4202', '452', '31'
-    CASE WHEN REGEXP_CONTAINS(zip, r'^\d{5}$') THEN zip END          AS zip,
-    NULLIF(TRIM(community_council_neighborhood), '')                 AS community_council_neighborhood,
-    NULLIF(TRIM(REGEXP_REPLACE(cpd_neighborhood, r'\s+', ' ')), '')  AS cpd_neighborhood,
-    NULLIF(TRIM(sna_neighborhood), '')                               AS sna_neighborhood,
-    NULLIF(TRIM(roadclass), '')                                      AS road_class_code,
-    NULLIF(TRIM(roadclassdesc), '')                                  AS road_class_desc,
-    -- Feed contains 'BB', 'NN', 'NB', 913, 933, 122
-    CASE WHEN SAFE_CAST(age AS INT64) BETWEEN 0 AND 110
-         THEN SAFE_CAST(age AS INT64) END                            AS age
-  FROM crashes.stg_crash_person
+    -- rvmt-pkmq's location columns that 7iz8-ecuw doesn't publish. Its SNA
+    -- neighborhoods use different boundaries from rvmt-pkmq's (Queensgate
+    -- merged into Lower Price Hill, Paddock Hills split from North
+    -- Avondale), so they go in `neighborhood`, not sna_neighborhood: each
+    -- dim_location column keeps one meaning.
+    CAST(NULL AS STRING)                                             AS zip,
+    CAST(NULL AS STRING)                                             AS community_council_neighborhood,
+    CAST(NULL AS STRING)                                             AS cpd_neighborhood,
+    CAST(NULL AS STRING)                                             AS sna_neighborhood,
+    CAST(NULL AS STRING)                                             AS road_class_code,
+    CAST(NULL AS STRING)                                             AS road_class_desc,
+    NULLIF(TRIM(snaneighborhood), '')                                AS neighborhood,
+    -- Exact age is rvmt-pkmq only; this feed publishes agerange (canonical below)
+    CAST(NULL AS INT64)                                              AS age,
+    agerange
+  FROM owned
 ),
 canonical AS (
   SELECT
@@ -494,13 +617,16 @@ canonical AS (
 
     -- Pre-2019 'INJURY' is one bucket the 2019+ coding splits three ways, so
     -- it's labelled as unspecified rather than passed off as 'minor'.
+    -- 7iz8-ecuw calls that bucket 'Nonfatal Injury' (20,027 history crashes
+    -- coded '2 - INJURY' carry it there) and drops the numeric codes.
     CASE
       WHEN severity_lbl IS NULL OR severity_lbl = ''   THEN 'Unknown'
       WHEN severity_lbl LIKE 'FATAL%'                  THEN 'Fatal'
       WHEN severity_lbl LIKE 'SERIOUS INJURY%'         THEN 'Serious Injury Suspected'
       WHEN severity_lbl LIKE 'MINOR INJURY%'           THEN 'Minor Injury Suspected'
       WHEN severity_lbl LIKE 'INJURY POSSIBLE%'        THEN 'Possible Injury'
-      WHEN severity_lbl = 'INJURY'                     THEN 'Injury (Severity Unspecified)'
+      WHEN severity_lbl = 'INJURY'
+        OR severity_lbl = 'NONFATAL INJURY'            THEN 'Injury (Severity Unspecified)'
       WHEN severity_lbl LIKE 'PROPERTY DAMAGE ONLY%'   THEN 'Property Damage Only'
       ELSE 'Unknown'
     END AS crash_severity,
@@ -525,38 +651,9 @@ canonical AS (
       ELSE 'Unknown'
     END AS type_of_person,
 
-    -- Rolled up from the LABEL, never the code ('03' is MID SIZE in one era
-    -- and SPORT UTILITY VEHICLE in the other). Order matters: MOPED is tested
-    -- before BICYCLE ('MOPED OR MOTORIZED BICYCLE'), and the van rules are
-    -- prefix-anchored so 'BUS /VAN' still lands in Bus.
-    CASE
-      WHEN unit_lbl IS NULL OR unit_lbl = ''           THEN 'Unknown'
-      WHEN unit_lbl LIKE '%SPORT UTILITY%'             THEN 'SUV'
-      WHEN unit_lbl LIKE 'PICK%'                       THEN 'Pickup'
-      WHEN unit_lbl LIKE '%MINIVAN%'
-        OR unit_lbl LIKE 'VAN%'
-        OR unit_lbl LIKE 'CARGO VAN%'                  THEN 'Van'
-      WHEN unit_lbl LIKE 'BUS%'                        THEN 'Bus'
-      WHEN unit_lbl LIKE '%SEMI%'
-        OR unit_lbl LIKE 'TRACTOR%'                    -- TRACTOR/DOUBLES, TRACTOR/TRIPLES
-        OR unit_lbl LIKE '%TRUCK%'
-        OR unit_lbl LIKE '%HEAVY%'                     THEN 'Truck/Heavy'
-      WHEN unit_lbl LIKE 'MOTORCYCLE%'
-        OR unit_lbl LIKE 'MOPED%'
-        OR unit_lbl LIKE 'MOTORIZED BICYCLE%'
-        OR unit_lbl LIKE 'AUTOCYCLE%'                  THEN 'Motorcycle/Moped'
-      WHEN unit_lbl LIKE 'BICYCLE%'                    THEN 'Bicycle'
-      WHEN unit_lbl LIKE 'PEDESTRIAN%'                 THEN 'Pedestrian/Skater'
-      WHEN unit_lbl LIKE '%NON-MOTORIST%'
-        OR unit_lbl LIKE 'WHEELCHAIR%'                 THEN 'Other Non-Motorist'
-      WHEN unit_lbl LIKE 'PASSENGER CAR%'
-        OR unit_lbl LIKE '%COMPACT%'
-        OR unit_lbl LIKE 'MID SIZE%'
-        OR unit_lbl LIKE 'FULL SIZE%'
-        OR unit_lbl LIKE '%PASSENGER VEHICLE%'         THEN 'Passenger Car'
-      WHEN unit_lbl LIKE 'UNKNOWN%'                    THEN 'Unknown'
-      ELSE 'Other'
-    END AS unit_category,
+    -- 7iz8-ecuw publishes no unit type. The history's members keep the
+    -- categories rvmt-pkmq's labels gave them (SUV, Pickup, Bicycle, ...).
+    'Unknown' AS unit_category,
 
     -- 'M - MALE' and bare 'MALE' both occur
     CASE
@@ -565,23 +662,24 @@ canonical AS (
       ELSE 'Unknown'
     END AS gender_norm,
 
+    -- The published range, under the labels the fact's age_range uses (the
+    -- history's exact ages are cut at the same boundaries, Section 1). A
+    -- label outside this list lands in Unknown, and Section 6 lists it.
     CASE
-      WHEN age IS NULL THEN 'Unknown'
-      WHEN age < 16    THEN '00-15'
-      WHEN age < 21    THEN '16-20'
-      WHEN age < 25    THEN '21-24'
-      WHEN age < 35    THEN '25-34'
-      WHEN age < 45    THEN '35-44'
-      WHEN age < 55    THEN '45-54'
-      WHEN age < 65    THEN '55-64'
-      WHEN age < 75    THEN '65-74'
-      ELSE '75+'
-    END AS age_band,
+      WHEN UPPER(TRIM(agerange)) = '15 OR UNDER' THEN '00-15'
+      WHEN TRIM(agerange) IN ('16-19', '20-24', '25-34', '35-44', '45-54',
+                              '55-64', '65-74', '75+') THEN TRIM(agerange)
+      ELSE 'Unknown'
+    END AS age_range,
 
+    -- rvmt-pkmq read the era off crashseverityid, which 7iz8-ecuw doesn't
+    -- publish. Ohio's switch was a clean cutover by crash date: of ~2,500-
+    -- 3,200 person rows a month either side, at most 107 a month in late 2018
+    -- carried 2019 codes and 2 in January 2019 carried old ones.
     CASE
-      WHEN crashseverityid IS NULL      THEN 'Unknown'
-      WHEN crashseverityid LIKE '2019%' THEN '2019+'
-      ELSE 'Pre-2019'
+      WHEN crash_datetime IS NULL                  THEN 'Unknown'
+      WHEN crash_datetime < DATETIME '2019-01-01'  THEN 'Pre-2019'
+      ELSE '2019+'
     END AS coding_era
   FROM typed
 )
@@ -609,34 +707,45 @@ SELECT
     ELSE 0
   END AS crash_severity_rank,
 
-  CASE age_band
-    WHEN '00-15' THEN 1 WHEN '16-20' THEN 2 WHEN '21-24' THEN 3
+  -- dim_person_profile's age_band. For this feed it is the published range
+  -- (see the dimension's DDL comment); the rvmt-pkmq members keep their
+  -- exact-age bands, which sort into the same slots.
+  c.age_range AS age_band,
+  CASE c.age_range
+    WHEN '00-15' THEN 1 WHEN '16-19' THEN 2 WHEN '20-24' THEN 3
     WHEN '25-34' THEN 4 WHEN '35-44' THEN 5 WHEN '45-54' THEN 6
     WHEN '55-64' THEN 7 WHEN '65-74' THEN 8 WHEN '75+'   THEN 9
     ELSE 99
   END AS age_band_sort,
 
   -- Natural keys. Conditions, crash type and person profile are built from
-  -- RAW values (plus the derived age_band), so correcting a canonicalization
-  -- rule keeps each member's surrogate key and --reprocess updates its
-  -- attributes in place. Location hashes the CLEANED address, zip,
+  -- RAW values (plus the derived age_band and coding_era), so correcting a
+  -- canonicalization rule keeps each member's surrogate key and --reprocess
+  -- updates its attributes in place. Location hashes the CLEANED address, zip,
   -- neighborhood and road-class values, so changing that cleanup (or the age
   -- bands) creates new members instead and leaves the old ones orphaned.
   -- IFNULL(x, '~') because NULL propagates through FORMAT/CONCAT. The '|' and
   -- '~' separators are unambiguous only because Section 3 rejects raw values
   -- containing either character.
+  -- 7iz8-ecuw's values are title case where rvmt-pkmq's were upper case
+  -- ('D - Driver', 'D - DRIVER'), so its crashes get members of their own;
+  -- the canonical attributes line up across both.
   FORMAT('%s|%s|%s|%s|%s',
     IFNULL(lightconditionsprimary, '~'), IFNULL(roadconditionsprimary, '~'),
     IFNULL(roadcontour, '~'), IFNULL(roadsurface, '~'), IFNULL(weather, '~')
   ) AS conditions_nk,
 
+  -- The middle part was rvmt-pkmq's crashseverityid, which said the era.
+  -- This feed has no code, so the era itself takes its place: without it,
+  -- one 'Property Damage Only' key would cover crashes of both eras and
+  -- Section 4 would build two members with that key.
   FORMAT('%s|%s|%s',
-    IFNULL(mannerofcrash, '~'), IFNULL(crashseverityid, '~'), IFNULL(crashseverity, '~')
+    IFNULL(mannerofcrash, '~'), coding_era, IFNULL(crashseverity, '~')
   ) AS crash_type_nk,
 
   FORMAT('%s|%s|%s|%s|%s',
     IFNULL(typeofperson, '~'), IFNULL(unittype, '~'), IFNULL(gender, '~'),
-    age_band, IFNULL(injuries, '~')
+    c.age_range, IFNULL(injuries, '~')
   ) AS person_profile_nk,
 
   -- Hashed: the readable tuple runs ~150 chars on the widest dimension.
@@ -751,8 +860,10 @@ WHERE NOT EXISTS (SELECT 1 FROM crashes.dim_person_profile WHERE person_profile_
 --
 -- WATERMARK: :updated_at does not work as a per-row watermark on this feed.
 -- Measured on the live API: COUNT(DISTINCT :updated_at) = 1 and
--- COUNT(DISTINCT :created_at) = 1 across all 433,160 rows, while
--- COUNT(DISTINCT :version) = 433,160. Socrata restamps every row on each
+-- COUNT(DISTINCT :created_at) = 1 across all 433,160 rvmt-pkmq rows, while
+-- COUNT(DISTINCT :version) = 433,160; 7iz8-ecuw likewise carries one
+-- :updated_at and one :created_at across its 449,817 rows (2026-10-15).
+-- Socrata restamps every row on each
 -- publish, so `:updated_at > last_run` returns everything or nothing.
 -- It's still stored on the fact (it identifies the publish a row came from).
 -- :version is unique per row but random ('rv-ei6x_bj7f_buq7'), so it can't
@@ -775,8 +886,14 @@ ASSERT (SELECT COUNT(*) FROM crashes.stg_crash_person) > 0
 
 ASSERT NOT EXISTS (
   SELECT 1 FROM crashes.stg_crash_person
-  WHERE socrata_id IS NULL OR instanceid IS NULL OR socrata_updated_at IS NULL
-) AS 'Staging has rows without :id, instanceid or :updated_at.';
+  WHERE socrata_id IS NULL OR reportnumber IS NULL OR socrata_updated_at IS NULL
+) AS 'Staging has rows without :id, reportnumber or :updated_at.';
+
+-- What this load owns is decided by source_dataset (see TWO SOURCES), so
+-- every fact row must carry one. Rows without it predate the column and
+-- --setup labels them.
+ASSERT NOT EXISTS (SELECT 1 FROM crashes.fact_crash_person WHERE source_dataset IS NULL)
+  AS 'fact_crash_person has rows without source_dataset. Run Run_Pipeline.py --setup before loading.';
 
 -- One publish. A republish mid-fetch regenerates every :id, and pages
 -- ordered by :id then skip or repeat rows. On this feed every row of a
@@ -805,32 +922,36 @@ ASSERT NOT EXISTS (
 -- The readable natural keys in the cleaning view join values with '|' and
 -- write NULL as '~', so a value containing either could give two different
 -- members one key. None does today; stop rather than merge them. Every key
--- component is one of these raw columns or derived from them without adding
--- characters, so checking the raw columns covers every serialized part.
+-- component is one of these raw columns, derived from them without adding
+-- characters, or taken from a fixed list (age_range, coding_era), so
+-- checking the raw columns covers every serialized part.
 ASSERT NOT EXISTS (
   SELECT 1 FROM crashes.stg_crash_person
   WHERE REGEXP_CONTAINS(CONCAT(
     IFNULL(lightconditionsprimary, ''), IFNULL(roadconditionsprimary, ''),
     IFNULL(roadcontour, ''), IFNULL(roadsurface, ''), IFNULL(weather, ''),
-    IFNULL(mannerofcrash, ''), IFNULL(crashseverityid, ''), IFNULL(crashseverity, ''),
-    IFNULL(typeofperson, ''), IFNULL(unittype, ''), IFNULL(gender, ''), IFNULL(injuries, ''),
-    IFNULL(address, ''), IFNULL(zip, ''), IFNULL(community_council_neighborhood, ''),
-    IFNULL(cpd_neighborhood, ''), IFNULL(sna_neighborhood, ''), IFNULL(roadclass, ''),
-    IFNULL(roadclassdesc, ''), IFNULL(crashlocation, '')), r'[|~]')
+    IFNULL(mannerofcrash, ''), IFNULL(crashseverity, ''),
+    IFNULL(typeofperson, ''), IFNULL(gender, ''), IFNULL(injuries, ''),
+    IFNULL(address, ''), IFNULL(crashlocation, '')), r'[|~]')
 ) AS 'A natural-key value contains | or ~, which would make dimension keys ambiguous. Switch the keys to TO_JSON_STRING before loading.';
 
 -- Completeness against what the fact already holds for the same window,
 -- counted before anything changes, so a partial extract can't delete or
 -- shrink the rest. People are counted as well as crashes: losing one person
--- from every crash would leave the crash count intact.
+-- from every crash would leave the crash count intact. Both sides count
+-- only what this load owns: the cleaning view leaves out staged crashes
+-- already in the history, and the fact side is the 7iz8-ecuw rows. Staged
+-- people are counted before Section 5 drops repeated drivers, so they can
+-- only run higher than the fact's.
 SET (staged_crashes, staged_people) = (
   SELECT AS STRUCT COUNT(DISTINCT instanceid), COUNT(DISTINCT socrata_id)
-  FROM crashes.stg_crash_person
+  FROM crashes.vw_stg_crash_person_clean
 );
 SET (window_crashes, window_people) = (
   SELECT AS STRUCT COUNT(DISTINCT instanceid), COUNT(*)
   FROM crashes.fact_crash_person
-  WHERE @window_start IS NULL OR crash_date >= @window_start
+  WHERE source_dataset = '7iz8-ecuw'
+    AND (@window_start IS NULL OR crash_date >= @window_start)
 );
 IF staged_crashes < 0.9 * window_crashes OR staged_people < 0.9 * window_people THEN
   RAISE USING MESSAGE = FORMAT(
@@ -1077,6 +1198,14 @@ ASSERT NOT EXISTS (SELECT person_profile_nk FROM crashes.dim_person_profile GROU
 -- @load_mode, @started_at, @rows_staged (all from
 -- Run_Pipeline.section5_params).
 --
+-- Everything below works on the crashes this load OWNS: source_dataset =
+-- '7iz8-ecuw' in the fact, and the cleaning view's rows in staging (which
+-- leave out crashes already in the history). The rvmt-pkmq history is never
+-- compared, rewritten or deleted: every DELETE names the source, and a
+-- check inside the transaction counts the history rows before and after.
+-- The one write to history rows is filling `neighborhood`, once, from the
+-- staged crash with the same report number; see history_neighborhood below.
+--
 -- Why not MERGE on :id: Socrata regenerates every :id and :version when it
 -- republishes the dataset. On 2026-09-19 all 6,791 rows of a delta window
 -- came back under new ids with unchanged content, and a MERGE on :id
@@ -1124,7 +1253,8 @@ ASSERT NOT EXISTS (SELECT person_profile_nk FROM crashes.dim_person_profile GROU
 --     type or person profile member (Section 4 just created every member);
 --   * every staged crash the load could judge ends with exactly its staged
 --     row count and hash, so a dimension fan-out, which adds rows, fails;
---   * every crash in the fact carries exactly one non-NULL hash.
+--   * every crash in the fact carries exactly one non-NULL hash;
+--   * the history has exactly as many rows as before.
 -- Staging's own checks ran in Section 3, before anything changed.
 --
 -- Natural keys are exchanged for surrogate keys here. LEFT JOIN + IFNULL
@@ -1136,7 +1266,8 @@ ASSERT NOT EXISTS (SELECT person_profile_nk FROM crashes.dim_person_profile GROU
 -- returns the counts Run_Pipeline.py prints.
 -- ============================================================
 
-DECLARE rows_inserted, rows_deleted, crashes_removed INT64 DEFAULT 0;
+DECLARE rows_inserted, rows_deleted, crashes_removed, history_rows_named INT64 DEFAULT 0;
+DECLARE history_rows, crashes_in_history INT64;
 
 -- Downtown anchor for distance_to_cbd_m: Fountain Square (the Tyler Davidson
 -- Fountain at Fifth and Vine), Cincinnati's central public square and the
@@ -1157,10 +1288,43 @@ DECLARE cbd_lat FLOAT64 DEFAULT  39.1011;
 
 -- One row per staged person, read from staging once. Section 3 guarantees
 -- a repeated :id is an exact repeat, so keeping any one copy is safe.
+--
+-- Then the one dedupe of people: a DRIVER row repeated exactly -- same
+-- crash, same unit, every published value the same; only :id and the
+-- fuzzed coordinates differ -- is kept once. A unit has one driver, and
+-- 7iz8-ecuw repeats 2.6-4.5% of its rows in every year, against 0.4% in
+-- rvmt-pkmq. Measured 2026-10-15 over each whole feed: dropping repeated
+-- drivers brings drivers per crash from 1.801 to 1.759 (rvmt-pkmq: 1.739),
+-- and 12,789 units published with two or more drivers fall to 4,341.
+-- Occupants and pedestrians are kept as published: with no exact age or
+-- unit type, two real passengers can look identical, and dropping their
+-- repeats would leave 7% fewer occupants than rvmt-pkmq had.
 CREATE TEMP TABLE stg_clean AS
+WITH one_per_id AS (
+  SELECT *
+  FROM crashes.vw_stg_crash_person_clean
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY socrata_id ORDER BY socrata_version DESC) = 1
+)
 SELECT *
-FROM crashes.vw_stg_crash_person_clean
-QUALIFY ROW_NUMBER() OVER (PARTITION BY socrata_id ORDER BY socrata_version DESC) = 1;
+FROM one_per_id
+QUALIFY type_of_person != 'Driver'
+     OR ROW_NUMBER() OVER (PARTITION BY row_json ORDER BY socrata_id) = 1;
+
+-- Staged crashes that are already history: the view leaves them out, so
+-- they are counted, and their neighborhood read, from staging itself. A
+-- crash whose rows disagree takes the larger name, as the panel would.
+CREATE TEMP TABLE history_neighborhood AS
+SELECT s.reportnumber AS localreportno,
+       MAX(NULLIF(TRIM(s.snaneighborhood), '')) AS neighborhood
+FROM crashes.stg_crash_person s
+JOIN (
+  SELECT DISTINCT localreportno FROM crashes.fact_crash_person
+  WHERE source_dataset = 'rvmt-pkmq'
+) h ON h.localreportno = s.reportnumber
+GROUP BY s.reportnumber;
+SET crashes_in_history = (SELECT COUNT(*) FROM history_neighborhood);
+SET history_rows = (SELECT COUNT(*) FROM crashes.fact_crash_person
+                    WHERE source_dataset = 'rvmt-pkmq');
 
 -- One row per staged crash: content hash and person-row count
 CREATE TEMP TABLE stg_crash AS
@@ -1171,9 +1335,11 @@ SELECT
 FROM stg_clean
 GROUP BY instanceid;
 
--- One row per fact crash, as it stands before this load. A crash whose rows
--- don't agree on a single non-NULL hash gets a NULL hash, so it compares as
--- changed. before_window marks what a delta can't judge (see above).
+-- One row per fact crash this load owns, as it stands before this load. A
+-- crash whose rows don't agree on a single non-NULL hash gets a NULL hash,
+-- so it compares as changed. before_window marks what a delta can't judge
+-- (see above). History crashes are not here, so nothing below can find
+-- them changed or missing.
 CREATE TEMP TABLE fact_crash AS
 SELECT
   instanceid,
@@ -1185,6 +1351,7 @@ SELECT
   @window_start IS NULL
     OR COUNTIF(crash_date >= @window_start) > 0                        AS in_window
 FROM crashes.fact_crash_person
+WHERE source_dataset = '7iz8-ecuw'
 GROUP BY instanceid;
 
 -- Staged crashes that differ from the fact (every one on --reprocess) ...
@@ -1242,16 +1409,17 @@ BEGIN
 
   -- Replace: drop every row of a changed crash (a new crash has none) ...
   DELETE FROM crashes.fact_crash_person
-  WHERE instanceid IN (SELECT instanceid FROM changed_crash);
+  WHERE source_dataset = '7iz8-ecuw'
+    AND instanceid IN (SELECT instanceid FROM changed_crash);
   SET rows_deleted = @@row_count;
 
   -- ... and insert its current rows
   INSERT INTO crashes.fact_crash_person
     (crash_date_key, reported_date_key, crash_time_key, location_key, conditions_key,
-     crash_type_key, person_profile_key, instanceid, localreportno, socrata_id,
+     crash_type_key, person_profile_key, instanceid, localreportno, source_dataset, socrata_id,
      crash_date, crash_datetime, reporting_lag_hours, latitude, longitude,
      distance_to_cbd_m,
-     person_count, is_injured, is_fatal, age,
+     person_count, is_injured, is_fatal, age, age_range, neighborhood,
      socrata_version, socrata_updated_at, loaded_at, crash_hash)
   SELECT
     IFNULL(dd_c.date_key,  19000101)        AS crash_date_key,
@@ -1263,6 +1431,7 @@ BEGIN
     IFNULL(dpp.person_profile_key, -1)      AS person_profile_key,
     v.instanceid,
     v.localreportno,
+    v.source_dataset,
     v.socrata_id,
     DATE(v.crash_datetime)                  AS crash_date,
     v.crash_datetime,
@@ -1280,6 +1449,8 @@ BEGIN
     IF(v.injury_severity_rank >= 2, 1, 0)   AS is_injured,
     IF(v.injury_severity_rank  = 5, 1, 0)   AS is_fatal,
     v.age,
+    v.age_range,
+    v.neighborhood,
     v.socrata_version,
     v.socrata_updated_at,
     CURRENT_TIMESTAMP()                     AS loaded_at,
@@ -1298,9 +1469,28 @@ BEGIN
 
   -- Reconcile upstream deletes
   DELETE FROM crashes.fact_crash_person
-  WHERE instanceid IN (SELECT instanceid FROM removed_crash);
+  WHERE source_dataset = '7iz8-ecuw'
+    AND instanceid IN (SELECT instanceid FROM removed_crash);
   SET rows_deleted = rows_deleted + @@row_count;
   SET crashes_removed = (SELECT COUNT(*) FROM removed_crash);
+
+  -- Name the history's neighborhoods in the new feed's scheme, once: only
+  -- rows still NULL, so a later load never changes a name already set. A
+  -- full load names all 220,957 history crashes the feed has; a delta, the
+  -- ones in its window. This is what lets the ML panel use one neighborhood
+  -- scheme across both sources.
+  UPDATE crashes.fact_crash_person f
+  SET neighborhood = n.neighborhood
+  FROM history_neighborhood n
+  WHERE f.source_dataset = 'rvmt-pkmq'
+    AND f.localreportno = n.localreportno
+    AND f.neighborhood IS NULL
+    AND n.neighborhood IS NOT NULL;
+  SET history_rows_named = @@row_count;
+
+  ASSERT (SELECT COUNT(*) FROM crashes.fact_crash_person WHERE source_dataset = 'rvmt-pkmq')
+         = history_rows
+    AS 'The load changed the number of rvmt-pkmq history rows. History is frozen; this is a bug in Section 5.';
 
   ASSERT NOT EXISTS (
     SELECT 1 FROM crashes.fact_crash_person
@@ -1318,6 +1508,7 @@ BEGIN
            ANY_VALUE(crash_hash), NULL) AS crash_hash,
         COUNT(*)                        AS person_rows
       FROM crashes.fact_crash_person
+      WHERE source_dataset = '7iz8-ecuw'
       GROUP BY instanceid
     ) f ON f.instanceid = s.instanceid
     WHERE s.instanceid NOT IN (SELECT instanceid FROM differing_crash WHERE deferred)
@@ -1362,7 +1553,9 @@ SELECT
   crashes_removed,
   (SELECT COUNTIF(deferred)   FROM differing_crash) AS crashes_deferred,
   rows_inserted,
-  rows_deleted;
+  rows_deleted,
+  crashes_in_history,     -- staged crashes left alone because the history has them
+  history_rows_named;     -- history rows whose neighborhood this load filled
 
 
 -- ============================================================
@@ -1372,10 +1565,10 @@ SELECT
 -- the whole fact, so watch them for jumps.
 -- ============================================================
 
--- Rows that fell through to Unknown members. Expected on the current feed:
--- crash dates 7 (5 NULL crashdate + 2 dated 1900-02-06), reported dates 7
--- (NULL datecrashreported), times 5 (NULL crashdate). The four junk and
--- location dimensions must be 0 (Section 5 fails a load that adds one).
+-- Rows that fell through to Unknown members. Expected from the rvmt-pkmq
+-- history: crash dates 7 (5 NULL crashdate + 2 dated 1900-02-06), reported
+-- dates 7 (NULL datecrashreported), times 5 (NULL crashdate). The four junk
+-- and location dimensions must be 0 (Section 5 fails a load that adds one).
 SELECT COUNTIF(crash_date_key     = 19000101) AS unknown_crash_dates,
        COUNTIF(reported_date_key  = 19000101) AS unknown_reported_dates,
        COUNTIF(crash_time_key     = -1)       AS unknown_times,
@@ -1385,30 +1578,46 @@ SELECT COUNTIF(crash_date_key     = 19000101) AS unknown_crash_dates,
        COUNTIF(person_profile_key = -1)       AS unknown_person_profiles
 FROM crashes.fact_crash_person;
 
--- Grain. persons_per_crash should sit near 1.96: near 1.0 means staging was
--- deduped on instanceid upstream. multi_date_crashes counts crashes whose
--- person rows carry different crash dates (0 so far): deltas defer them to
--- full loads (Section 5) and the ML panel places them by their latest date.
--- repeated_socrata_ids should be 0, though :id alone proves little here,
--- since each republish regenerates it.
+-- Grain, per source. persons_per_crash sits near 1.96 for rvmt-pkmq and
+-- should sit near 1.99 for 7iz8-ecuw (2.03 published, less the repeated
+-- drivers Section 5 drops); near 1.0 means staging was deduped on the crash
+-- key upstream. multi_date_crashes counts crashes whose person rows carry
+-- different crash dates: deltas defer them to full loads (Section 5) and the
+-- ML panel places them by their latest date. repeated_socrata_ids should be
+-- 0, though :id alone proves little here, since each republish regenerates
+-- it. For the history, crashes_without_neighborhood should be 332 (the
+-- crashes 7iz8-ecuw doesn't have) once a full load has named the rest.
+WITH crash AS (
+  SELECT source_dataset, instanceid, COUNT(DISTINCT crash_date) > 1 AS multi_date
+  FROM crashes.fact_crash_person
+  GROUP BY source_dataset, instanceid
+)
 SELECT
-  (SELECT COUNT(*) FROM crashes.stg_crash_person)  AS staged,
+  f.source_dataset,
   COUNT(*)                                         AS fact_rows,
-  COUNT(DISTINCT instanceid)                       AS distinct_crashes,
-  ROUND(SAFE_DIVIDE(COUNT(*), COUNT(DISTINCT instanceid)), 3) AS persons_per_crash,
-  (SELECT COUNT(*) FROM (
-     SELECT instanceid FROM crashes.fact_crash_person
-     GROUP BY instanceid HAVING COUNT(DISTINCT crash_date) > 1))  AS multi_date_crashes,
-  COUNT(*) - COUNT(DISTINCT socrata_id)            AS repeated_socrata_ids
-FROM crashes.fact_crash_person;
+  COUNT(DISTINCT f.instanceid)                     AS distinct_crashes,
+  ROUND(SAFE_DIVIDE(COUNT(*), COUNT(DISTINCT f.instanceid)), 3) AS persons_per_crash,
+  COUNT(DISTINCT IF(c.multi_date, f.instanceid, NULL))          AS multi_date_crashes,
+  COUNT(*) - COUNT(DISTINCT f.socrata_id)          AS repeated_socrata_ids,
+  COUNT(DISTINCT IF(f.neighborhood IS NULL, f.instanceid, NULL)) AS crashes_without_neighborhood,
+  MAX(f.crash_date)                                AS newest_crash_date
+FROM crashes.fact_crash_person f
+JOIN crash c USING (source_dataset, instanceid)
+GROUP BY f.source_dataset
+ORDER BY f.source_dataset;
 
 -- Source data quality. Expected to be nonzero — these measure the feed,
--- not a bug — but a sudden jump means the feed changed.
-SELECT COUNTIF(age IS NULL)                   AS null_or_invalid_age,
+-- not a bug — but a sudden jump means the feed changed. Every 7iz8-ecuw age
+-- is NULL by design (it publishes age_range).
+SELECT source_dataset,
+       COUNTIF(age IS NULL)                   AS null_or_invalid_age,
+       COUNTIF(age_range = 'Unknown')         AS unknown_age_range,
        COUNTIF(crash_datetime IS NULL)        AS unparseable_crash_datetime,
        COUNTIF(reporting_lag_hours < 0)       AS reported_before_crash,
        COUNTIF(reporting_lag_hours > 24 * 30) AS reported_over_30_days_later
-FROM crashes.fact_crash_person;
+FROM crashes.fact_crash_person
+GROUP BY source_dataset
+ORDER BY source_dataset;
 
 -- Canonicalization coverage. A growing count here means the feed introduced
 -- a label the cleaning view's CASE ladders don't recognize.
@@ -1425,7 +1634,16 @@ UNION ALL
 SELECT 'crash_severity', ct.crash_severity, COUNT(*)
 FROM crashes.fact_crash_person f JOIN crashes.dim_crash_type ct USING (crash_type_key)
 WHERE ct.crash_severity = 'Unknown' AND ct.crash_severity_raw IS NOT NULL
-GROUP BY ct.crash_severity;
+GROUP BY ct.crash_severity
+UNION ALL
+-- The raw label isn't kept past staging, so unrecognized age ranges are
+-- listed from the extract this load staged.
+SELECT 'agerange', agerange, COUNT(*)
+FROM crashes.stg_crash_person
+WHERE UPPER(TRIM(agerange)) NOT IN ('15 OR UNDER', '16-19', '20-24', '25-34', '35-44',
+                                    '45-54', '55-64', '65-74', '75+', 'UNKNOWN')
+   OR agerange IS NULL
+GROUP BY agerange;
 
 -- Coding-era split. Both eras should be present, with comparable fatality
 -- rates — a large gap means the two scales aren't being reconciled.

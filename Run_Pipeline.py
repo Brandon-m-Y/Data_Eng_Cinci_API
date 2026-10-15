@@ -13,20 +13,29 @@ Usage:
                                             derived column: reinstalls the view,
                                             updates existing dimension members
                                             in place and rewrites every crash
+                                            from 7iz8-ecuw
   python Run_Pipeline.py --setup --full     both in one go
   python Run_Pipeline.py --panel            rebuild only the ML panel
                                             (every load rebuilds it anyway)
+
+Two sources:
+  The feed is 7iz8-ecuw. The history loaded from rvmt-pkmq (private since
+  2026-10-15) stays in the fact, frozen: loads add and maintain 7iz8-ecuw
+  crashes only, skipping any crash whose report number the history already
+  has. See TWO SOURCES at the top of Star_Schema_ETL.sql.
 
 Delta vs full:
   The feed has no usable change stamp (:updated_at is one value for every row,
   :version is random), so a delta windows on crash date. The watermark is read
   from the fact itself, so a failed run leaves nothing to reset. Socrata
   regenerates every :id on a republish, so the fact is replaced crash by
-  crash on instanceid: only crashes whose content hash changed are rewritten,
-  and crashes removed upstream within the window are deleted, all in one
-  transaction. --full does the same over all history; run it regularly to
-  catch amendments older than the window and crashes a delta deferred.
-  A delta against an empty fact falls back to a full load.
+  crash on the report number: only crashes whose content hash changed are
+  rewritten, and crashes removed upstream within the window are deleted, all
+  in one transaction. --full does the same over all history; run it regularly
+  to catch amendments older than the window and crashes a delta deferred.
+  A delta falls back to a full load against an empty fact, and while the
+  history has never been matched to 7iz8-ecuw (the first load after the
+  source switch), since only a full extract covers every history crash.
 
 One writer at a time:
   Every writer owns the non-expiring lock in etl_lease (SQL Section 10).
@@ -320,17 +329,26 @@ def run_checks(client, sql):
 
 
 def delta_watermark(client, config):
-    """First crash date a delta load pulls, or None if the fact is empty.
+    """(first crash date a delta pulls, whether the history is still unnamed).
 
-    Capped at today so a mistyped future crash date can't push the window
-    past the present and stall every later delta.
+    The date is None if the fact is empty, and capped at today so a mistyped
+    future crash date can't push the window past the present and stall every
+    later delta. The history is unnamed until a load has matched it to
+    7iz8-ecuw and filled its `neighborhood` (SQL Section 5): a delta would
+    name only the crashes in its window and leave the ML panel without
+    neighborhoods for the rest.
     """
     sql = f"""
-        SELECT DATE_SUB(MAX(crash_date), INTERVAL {LOOKBACK_DAYS} DAY) AS window_start
+        SELECT
+          DATE_SUB(MAX(IF(crash_date <= CURRENT_DATE(), crash_date, NULL)),
+                   INTERVAL {LOOKBACK_DAYS} DAY) AS window_start,
+          COUNTIF(source_dataset = 'rvmt-pkmq') > 0
+            AND COUNTIF(source_dataset = 'rvmt-pkmq' AND neighborhood IS NOT NULL) = 0
+            AS history_unnamed
         FROM `{config.table('fact_crash_person')}`
-        WHERE crash_date <= CURRENT_DATE()
     """
-    return next(iter(client.query(sql, job_config=job_config()).result())).window_start
+    row = next(iter(client.query(sql, job_config=job_config()).result()))
+    return row.window_start, row.history_unnamed
 
 
 # BigQuery label grammar: lowercase letters, digits, dashes and underscores,
@@ -395,9 +413,14 @@ def run_load(client, config, lease, sections, args, started_at):
 
     try:
         if args.delta:
-            window_start = delta_watermark(client, config)
+            window_start, history_unnamed = delta_watermark(client, config)
             if window_start is None:
                 print('Fact table is empty; running a full load instead of a delta.')
+                load_mode = 'full'
+            elif history_unnamed:
+                print('The history has not been matched to 7iz8-ecuw yet; '
+                      'running a full load instead of a delta.')
+                window_start = None
                 load_mode = 'full'
 
         stage = 'fetch'
@@ -410,7 +433,7 @@ def run_load(client, config, lease, sections, args, started_at):
         if df.empty:
             # A 90-day window, let alone the full history, is never really empty
             raise RuntimeError('The API returned no rows; refusing to treat an empty extract as a load.')
-        print(f'{len(df):,} person-rows across {df["instanceid"].nunique():,} crashes.')
+        print(f'{len(df):,} person-rows across {df["reportnumber"].nunique():,} crashes.')
 
         stage = 'staging load'
         rows_staged = gbq.load_staging(df, client, config, lease=lease)
@@ -433,6 +456,8 @@ def run_load(client, config, lease, sections, args, started_at):
               f"{counts['crashes_removed']} removed upstream, "
               f"{counts['crashes_deferred']} deferred to the next full load")
         print(f"   fact rows: {counts['rows_inserted']} inserted, {counts['rows_deleted']} deleted")
+        print(f"   history: {counts['crashes_in_history']} staged crashes already there and left alone, "
+              f"{counts['history_rows_named']} history rows given their neighborhood")
 
         stage = 'section 6'
         print('-- Section 6: sanity checks')
@@ -477,7 +502,8 @@ def main():
                       help='load the entire history')
     parser.add_argument('--reprocess', action='store_true',
                         help='with --full: apply changed cleaning logic to existing '
-                             'dimension members and rewrite every crash (implies --setup)')
+                             'dimension members and rewrite every 7iz8-ecuw crash '
+                             '(implies --setup)')
     parser.add_argument('--allow-deletions', action='store_true',
                         help='let a load delete more crashes than the cap (100, or 1%% of the '
                              'crashes it could delete) after confirming they are gone upstream')

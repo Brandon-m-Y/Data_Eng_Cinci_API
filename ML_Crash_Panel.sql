@@ -39,11 +39,22 @@
 --                     days, so a 7-day buffer leaves only complete days.
 --
 -- CELL SCHEMES (p_cell_scheme):
---   cpd_neighborhood               53 neighborhoods + 'N/A' (default)
---   sna_neighborhood               51 neighborhoods
+--   neighborhood                   50 SNA neighborhoods + 'Unknown or Outside
+--                                  of City Limits', as 7iz8-ecuw names them
+--                                  (default). The fact carries it for BOTH
+--                                  sources -- history crashes are matched to
+--                                  the new feed by report number -- so it is
+--                                  the only scheme that keeps counting after
+--                                  the 2026-10-15 source switch.
+--   cpd_neighborhood               53 neighborhoods + 'N/A'
+--   sna_neighborhood               51 neighborhoods, rvmt-pkmq's boundaries
 --   community_council_neighborhood 71, incl. sparse boundary combinations
 --                                  ('HYDE PARK - OAKLEY', 155 crashes)
--- 'N/A' and NULL cells are dropped (3,543 crashes since 2016 under CPD).
+-- The last three are rvmt-pkmq's own columns and are NULL for every
+-- 7iz8-ecuw crash: a panel built on one of them reads zero crashes
+-- everywhere once the window passes 2026-08-24. Use them for history only.
+-- 'N/A', 'Unknown or Outside of City Limits' and NULL cells are dropped
+-- (3,543 crashes since 2016 under CPD).
 -- ============================================================
 
 
@@ -95,7 +106,7 @@ CREATE TABLE IF NOT EXISTS crashes.ml_cell_attributes (
 
 -- Grain and split configuration. Changing the cell scheme or bounds is a
 -- config change here, not a rewrite.
-DECLARE p_cell_scheme     STRING DEFAULT 'cpd_neighborhood';
+DECLARE p_cell_scheme     STRING DEFAULT 'neighborhood';
 DECLARE p_start           DATE   DEFAULT DATE '2016-01-01';
 DECLARE p_end_buffer_days INT64  DEFAULT 7;
 DECLARE p_valid_start     DATE   DEFAULT DATE '2024-01-01';   -- train < this
@@ -115,8 +126,9 @@ SET p_end = (SELECT DATE_SUB(MAX(crash_date), INTERVAL p_end_buffer_days DAY)
              FROM crashes.fact_crash_person
              WHERE crash_date <= CURRENT_DATE());
 
-ASSERT p_cell_scheme IN ('cpd_neighborhood', 'sna_neighborhood', 'community_council_neighborhood')
-  AS 'p_cell_scheme must name a dim_location neighborhood column';
+ASSERT p_cell_scheme IN ('neighborhood', 'cpd_neighborhood', 'sna_neighborhood',
+                         'community_council_neighborhood')
+  AS 'p_cell_scheme must be neighborhood (on the fact) or a dim_location neighborhood column';
 
 -- Declared primary keys are NOT ENFORCED: reject duplicate join keys before
 -- joining or calculating window functions, rather than discovering fan-out later.
@@ -128,17 +140,24 @@ ASSERT NOT EXISTS (
   GROUP BY cell_scheme, cell_id HAVING COUNT(*) > 1
 ) AS 'Duplicate cell attribute key: (cell_scheme, cell_id) must be unique';
 
+-- A crash with no real neighborhood: rvmt-pkmq wrote 'N/A', 7iz8-ecuw
+-- writes 'Unknown or Outside of City Limits'. Both drop out like NULL.
+CREATE TEMP FUNCTION cell_name(raw STRING) AS (
+  IF(UPPER(raw) IN ('N/A', 'UNKNOWN OR OUTSIDE OF CITY LIMITS'), NULL, UPPER(raw))
+);
+
 -- Step 2 of the spec: one row per crash. MAX is deterministic; disagreements
 -- in source placement are reported separately over the unfiltered fact in Section 3.
 CREATE TEMP TABLE crash_cells AS
 SELECT
   f.instanceid,
   MAX(f.crash_date) AS day,
-  MAX(NULLIF(UPPER(CASE p_cell_scheme
+  MAX(cell_name(CASE p_cell_scheme
+        WHEN 'neighborhood'                   THEN f.neighborhood
         WHEN 'cpd_neighborhood'               THEN l.cpd_neighborhood
         WHEN 'sna_neighborhood'               THEN l.sna_neighborhood
         WHEN 'community_council_neighborhood' THEN l.community_council_neighborhood
-      END), 'N/A')) AS cell_id
+      END)) AS cell_id
 FROM crashes.fact_crash_person f
 JOIN crashes.dim_location l USING (location_key)
 WHERE f.crash_date BETWEEN p_start AND p_end
@@ -490,18 +509,24 @@ ORDER BY first_day;
 -- Placement quality over ALL fact rows, before the panel date filter or MAX
 -- rollup can hide disagreements. JSON preserves NULL as a distinct value.
 WITH placements AS (
-  SELECT f.instanceid, scheme,
-         COUNT(DISTINCT TO_JSON_STRING(f.crash_date)) AS date_values,
-         COUNT(DISTINCT TO_JSON_STRING(NULLIF(UPPER(CASE scheme
-           WHEN 'cpd_neighborhood' THEN l.cpd_neighborhood
-           WHEN 'sna_neighborhood' THEN l.sna_neighborhood
-           WHEN 'community_council_neighborhood' THEN l.community_council_neighborhood
-         END), 'N/A'))) AS cell_values
-  FROM crashes.fact_crash_person f
-  JOIN crashes.dim_location l USING (location_key)
-  CROSS JOIN UNNEST(['cpd_neighborhood', 'sna_neighborhood',
-                    'community_council_neighborhood']) AS scheme
-  GROUP BY f.instanceid, scheme
+  SELECT instanceid, scheme,
+         COUNT(DISTINCT TO_JSON_STRING(crash_date)) AS date_values,
+         COUNT(DISTINCT TO_JSON_STRING(IF(
+           UPPER(cell) IN ('N/A', 'UNKNOWN OR OUTSIDE OF CITY LIMITS'), NULL, UPPER(cell)))) AS cell_values
+  FROM (
+    SELECT f.instanceid, f.crash_date, scheme,
+           CASE scheme
+             WHEN 'neighborhood'                   THEN f.neighborhood
+             WHEN 'cpd_neighborhood'               THEN l.cpd_neighborhood
+             WHEN 'sna_neighborhood'               THEN l.sna_neighborhood
+             WHEN 'community_council_neighborhood' THEN l.community_council_neighborhood
+           END AS cell
+    FROM crashes.fact_crash_person f
+    JOIN crashes.dim_location l USING (location_key)
+    CROSS JOIN UNNEST(['neighborhood', 'cpd_neighborhood', 'sna_neighborhood',
+                      'community_council_neighborhood']) AS scheme
+  )
+  GROUP BY instanceid, scheme
 )
 SELECT scheme AS cell_scheme,
        COUNTIF(date_values > 1) AS crashes_disagree_on_day,
@@ -519,16 +544,22 @@ WITH bounds AS (
   FROM crashes.ml_crash_panel
 ),
 crash_cell AS (
-  SELECT f.instanceid,
-         MAX(NULLIF(UPPER(CASE (SELECT scheme FROM bounds)
-           WHEN 'cpd_neighborhood'               THEN l.cpd_neighborhood
-           WHEN 'sna_neighborhood'               THEN l.sna_neighborhood
-           WHEN 'community_council_neighborhood' THEN l.community_council_neighborhood
-         END), 'N/A')) AS cell_id
-  FROM crashes.fact_crash_person f
-  JOIN crashes.dim_location l USING (location_key)
-  WHERE f.crash_date BETWEEN (SELECT first_day FROM bounds) AND (SELECT last_day FROM bounds)
-  GROUP BY f.instanceid
+  SELECT instanceid,
+         MAX(IF(UPPER(cell) IN ('N/A', 'UNKNOWN OR OUTSIDE OF CITY LIMITS'), NULL, UPPER(cell))) AS cell_id
+  FROM (
+    SELECT f.instanceid,
+           CASE b.scheme
+             WHEN 'neighborhood'                   THEN f.neighborhood
+             WHEN 'cpd_neighborhood'               THEN l.cpd_neighborhood
+             WHEN 'sna_neighborhood'               THEN l.sna_neighborhood
+             WHEN 'community_council_neighborhood' THEN l.community_council_neighborhood
+           END AS cell
+    FROM crashes.fact_crash_person f
+    JOIN crashes.dim_location l USING (location_key)
+    CROSS JOIN bounds b
+    WHERE f.crash_date BETWEEN b.first_day AND b.last_day
+  )
+  GROUP BY instanceid
 )
 SELECT (SELECT scheme FROM bounds) AS cell_scheme,
        cell_id                     AS excluded_cell,

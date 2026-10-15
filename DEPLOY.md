@@ -648,9 +648,12 @@ gcloud run jobs update crash-etl-full --image=<previous digest> --region=$REGION
 
 Resume with `gcloud scheduler jobs resume <name> --location=$REGION`.
 
-A rollback does not undo writes. The data model is rebuildable: `--full
---reprocess` re-derives every crash from the feed, so a bad load is recovered
-by fixing the code and reloading, not by restoring a backup.
+A rollback does not undo writes. The 7iz8-ecuw crashes are rebuildable:
+`--full --reprocess` re-derives every one of them from the feed, so a bad load
+is recovered by fixing the code and reloading. **The rvmt-pkmq history is
+not**: that feed went private on 2026-10-15, so a damaged history row can only
+come back from the `crashes_archive_rvmt` backup. No load writes to it except
+to fill `neighborhood` (see README.md, The source switch).
 
 ---
 
