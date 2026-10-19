@@ -5,8 +5,8 @@ this exists so the alert is reproducible and reviewable instead of hand-built,
 and so a changed watchdog.sql can be pushed without re-clicking it.
 
     pip install google-cloud-bigquery-datatransfer
-    python deploy/create_watchdog.py --service-account crash-etl-runtime@PROJECT.iam.gserviceaccount.com
-    python deploy/create_watchdog.py --update --service-account ...   # after editing watchdog.sql
+    python deploy/create_watchdog.py                     # report: owner, schedule, drift
+    python deploy/create_watchdog.py --update --as-me    # after editing watchdog.sql
 
 Create the watchdog in the BigQuery console, not here -- see DEPLOY.md
 step 8. This script cannot create one owned by a person: the API wants an
@@ -44,11 +44,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # safeguard to fail.
 TEST_SQL = """-- TEMPORARY. Installed by: create_watchdog.py --test-alert
 -- Restore the real watchdog with:
---   python deploy/create_watchdog.py --update --service-account <runtime SA>
+--   python deploy/create_watchdog.py --update --as-me
 RAISE USING MESSAGE =
   'WATCHDOG DELIVERY TEST -- this is not a real alert, nothing is wrong. '
   'Receiving this proves failure email works. Restore the real watchdog: '
-  'python deploy/create_watchdog.py --update --service-account <runtime SA>';
+  'python deploy/create_watchdog.py --update --as-me';
 """
 
 
@@ -74,11 +74,12 @@ def main():
                              'reaches; --update cannot move ownership.')
     args = parser.parse_args()
 
-    # dotenv_values, not load_dotenv: .env sets GOOGLE_APPLICATION_CREDENTIALS
-    # to the pipeline's own key, and exporting it here would make this script
-    # authenticate as the pipeline's service account -- which has no rights to
-    # create a scheduled query. Read the two settings needed and leave the
-    # environment alone, so the client uses your own ADC.
+    # dotenv_values, not load_dotenv: if .env ever sets
+    # GOOGLE_APPLICATION_CREDENTIALS again (it held the pipeline's own key
+    # until 2026-10-02), exporting it here would make this script authenticate
+    # as the pipeline's service account -- which has no rights to manage a
+    # scheduled query. Read the two settings needed and leave the environment
+    # alone, so the client uses your own ADC.
     env = dotenv_values(REPO_ROOT / '.env')
     project = os.getenv('GCP_PROJECT_ID') or env.get('GCP_PROJECT_ID')
     location = os.getenv('GCP_LOCATION') or env.get('GCP_LOCATION') or 'us-east1'
@@ -225,8 +226,8 @@ def main():
             except Exception as rollback_failure:
                 note = ('COULD NOT PUT THE PREVIOUS WATCHDOG BACK -- there is no\n'
                         'watchdog installed right now, and nothing is watching the\n'
-                        'writer lease. Reinstall one before scheduling anything:\n'
-                        '  python deploy/create_watchdog.py --service-account <runtime SA>\n'
+                        'writer lease. Recreate it in the BigQuery console (DEPLOY.md\n'
+                        'step 8) before scheduling anything.\n'
                         f'  (rollback error: {rollback_failure})')
             sys.exit(f'Create failed. {note}\n\n{type(failure).__name__}: {failure}')
         print(f'Created {result.name}')
@@ -243,9 +244,9 @@ def main():
 
     if args.test_alert:
         print('\n  *** THIS IS THE ALWAYS-FAILING TEST WATCHDOG, NOT THE REAL ONE ***\n'
-              '  It fails every hour on purpose. When the mail arrives, restore the\n'
-              '  real watchdog immediately:\n'
-              f'    python deploy/create_watchdog.py --update --service-account {runner}')
+              '  Every run fails on purpose (daily, and once now with --run-now).\n'
+              '  When the mail arrives, restore the real watchdog immediately:\n'
+              '    python deploy/create_watchdog.py --update --as-me')
     else:
         print('  A tripped guard fails the run, and the failed run sends the mail.\n'
               '  Verify with DEPLOY.md step 8.')

@@ -68,7 +68,9 @@ SET problems = ARRAY(
 
     -- 3. The feed went stale. Deltas keep succeeding against an unchanged
     -- publication, so guard 2 stays quiet while the data silently ages.
-    -- Observed cadence is 9-12 days; 21 days is two missed publishes.
+    -- rvmt-pkmq published every 9-12 days, so 21 days was two missed
+    -- publishes. 7iz8-ecuw has published daily since 2026-10-15; tighten
+    -- this once the new reporting system's cadence (from ~2026-10-31) is known.
     SELECT FORMAT(
       'STALE FEED: socrata_updated_at has read %s for %d days. Loads are '
       || 'succeeding but the city has not published. Check the Socrata dataset.',

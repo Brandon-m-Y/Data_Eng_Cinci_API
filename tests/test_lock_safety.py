@@ -51,28 +51,20 @@ class LockSafetyTests(unittest.TestCase):
         client = Mock()
         return pipeline.Lease(client, Config('test-project'), 'new-owner'), client
 
-    def test_expired_owner_cannot_be_replaced_while_reserved_job_is_absent(self):
+    def test_held_lock_blocks_acquire_whatever_its_age_or_job_state(self):
+        # The old process may be paused between stages, not dead, so neither
+        # an old acquired_at nor a finished job lets anyone else take over:
+        # acquire() never even looks at the holder's job.
         lease, client = self.lease()
         client.query.return_value.result.return_value = [
-            ('old-owner', datetime.now(timezone.utc), 'not-submitted-yet', True)]
-        client.get_job.side_effect = NotFound('not submitted yet')
+            ('old-owner', datetime(2026, 1, 1, tzinfo=timezone.utc), 'finished-job')]
         with patch.object(lease, '_update', return_value=0) as update:
-            with self.assertRaises(pipeline.LeaseError):
+            with self.assertRaisesRegex(pipeline.LeaseError, 'old-owner holds the ETL lease'):
                 lease.acquire()
             self.assertIn('holder IS NULL', update.call_args.args[0])
             self.assertNotIn('expires_at', update.call_args.args[0])
+        client.get_job.assert_not_called()
         self.assertFalse(lease.held)
-
-    def test_expired_owner_still_requires_recovery_after_job_is_done(self):
-        # The old process may be paused between stages, not dead.
-        lease, client = self.lease()
-        client.query.return_value.result.return_value = [
-            ('old-owner', datetime.now(timezone.utc), 'finished-job', True)]
-        client.get_job.return_value.state = 'DONE'
-        with patch.object(lease, '_update', return_value=0) as update:
-            with self.assertRaises(pipeline.LeaseError):
-                lease.acquire()
-            self.assertIn('holder IS NULL', update.call_args.args[0])
 
     def test_unknown_job_visibility_keeps_lock(self):
         lease, client = self.lease()

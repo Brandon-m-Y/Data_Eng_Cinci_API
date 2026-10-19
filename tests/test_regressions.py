@@ -126,7 +126,7 @@ class ExtractTests(unittest.TestCase):
         ] * 2) as query:
             result = extract.fetch()
         self.assertEqual(query.call_count, 6)
-        self.assertEqual(result.attrs['rows_updated_at'], 1001)
+        self.assertEqual(result.attrs['snapshot']['rows_updated_at'], 1001)
 
     def test_metadata_after_read_follows_last_count(self):
         events = []
@@ -367,13 +367,10 @@ class ConfigTests(unittest.TestCase):
         self.assertIn('`test_crashes.fact_crash_person`', result)
         self.assertEqual(config.table('stg_crash_person'), 'test-project.test_crashes.stg_crash_person')
 
-    def test_rejects_identifier_injection_and_unsupported_staging(self):
+    def test_rejects_identifier_injection(self):
         for dataset in ('bad.name', 'x`; DROP TABLE t; --', '', 'a-b'):
             with self.subTest(dataset=dataset), self.assertRaises(ValueError):
                 Config('test-project', dataset)
-        with patch.dict('os.environ', {'GCP_PROJECT_ID': 'test-project', 'GCP_STAGING_TABLE': 'other'}):
-            with self.assertRaisesRegex(ValueError, 'no longer configurable'):
-                Config.from_env()
 
 
 class PanelLabelTests(unittest.TestCase):

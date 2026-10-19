@@ -499,7 +499,7 @@ pip install -r requirements-dev.txt
 `requirements.txt` pins the pipeline's direct dependencies (tested with
 Python 3.13), and `constraints.txt` pins every transitive package to the
 tested versions; the Docker image installs the first with the second as
-constraints. `requirements-dev.txt` adds the notebook packages on top.
+constraints. `requirements-dev.txt` adds the ER-diagram tools on top.
 
 `.env` settings (git-ignored):
 
@@ -514,8 +514,8 @@ constraints. `requirements-dev.txt` adds the notebook packages on top.
 | `PANEL_SQL_FILE`                 | Optional, default`ML_Crash_Panel.sql`                                                                                                                                                                                                                                                                                  |
 | `DELTA_LOOKBACK_DAYS`            | Optional, default`90`                                                                                                                                                                                                                                                                                                  |
 
-`GCP_STAGING_TABLE` is no longer configurable (the SQL names the table), and
-the pipeline refuses to start if it's set to anything but `stg_crash_person`.
+The staging table is always `stg_crash_person`: the SQL names it, so it
+isn't a setting.
 
 The service account needs to create datasets and tables and run query jobs,
 for example with the BigQuery Data Editor and BigQuery Job User roles.
@@ -1136,9 +1136,8 @@ feed:
 | `TODO.md`                       | Open tasks.                                                                                                                                                                                                                                              |
 | `requirements.txt`              | Pinned direct runtime dependencies.                                                                                                                                                                                                                      |
 | `constraints.txt`               | Every transitive package pinned to the tested versions; the image installs under it.                                                                                                                                                                     |
-| `requirements-dev.txt`          | Runtime dependencies plus notebook packages.                                                                                                                                                                                                             |
+| `requirements-dev.txt`          | Runtime dependencies plus the ER-diagram tools for `Build_ERD.py`.                                                                                                                                                                                       |
 | `Dockerfile`, `.dockerignore` | Batch image for the Cloud Run Job, base pinned by digest.                                                                                                                                                                                                |
-| `Get_Data.ipynb`                | Scratch notebook. Uses the old single GET that downloads all ~435 MB.                                                                                                                                                                                    |
 
 The two SQL files are run section by section; what is in each one is the
 [SQL section map](#sql-section-map) under [Architecture](#architecture).
@@ -1227,8 +1226,6 @@ The two SQL files are run section by section; what is in each one is the
   OneDrive-synced folder; DEPLOY.md step 11 retired it, and local runs use
   your own application-default credentials. If `gcloud auth application-default login` has expired, a local run fails at
   `DefaultCredentialsError` rather than anything pipeline-shaped.
-- **`APP_ENV` and `GOOGLE_CLOUD_RUN_REGION_ENDPOINT` in `.env`** aren't read
-  by any code.
 - **Testing.** Run `python -m unittest discover -s tests` after any change.
   The offline suite needs no credentials. Run `tests/integration_bigquery.py`
   before deploying a change to the SQL or the runner: it clones the dataset

@@ -1,9 +1,5 @@
-# Local development: runtime deps plus notebooks
+# Local development: runtime deps plus the ER diagram tools
 -r requirements.txt
-
-seaborn==0.13.2
-matplotlib==3.10.7
-ipykernel==6.30.0
 
 # ER diagram generation (Build_ERD.py). Also needs a Graphviz install for
 # the image formats: `conda install graphviz`, or graphviz.org/download.

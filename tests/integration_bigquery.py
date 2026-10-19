@@ -1,22 +1,23 @@
-"""BigQuery integration test: runs the real pipeline against a throwaway clone.
+r"""BigQuery integration test: runs the real pipeline against a throwaway clone.
 
 Clones the `crashes` tables into a new dataset `crashes_it_<random>`, points
 the pipeline at it with GCP_DATASET, exercises the load end to end and its
 failure paths, then deletes the clone (also on failure). Production is only
 read (CLONE). Needs credentials and network, so it is not part of the
-offline suite:
+offline suite. In PowerShell:
 
-  docker run --rm --env-file .env -v "${PWD}:/app:ro" -w /app \
-    -v "$env:APPDATA\gcloud:/home/etl/.config/gcloud:ro" \
+  docker run --rm --env-file .env -v "${PWD}:/app:ro" -w /app `
+    -v "$env:APPDATA\gcloud:/home/etl/.config/gcloud:ro" `
     --entrypoint python cinci-crash-etl tests/integration_bigquery.py
 
+It also runs outside the image (python tests/integration_bigquery.py) when
+the credentials and .env are in place.
+
 Takes about 35 minutes and runs 69 checks: most of the time is the five
-Socrata extracts (three delta windows and two full histories: the first
-delta after the 2026-10-15 source switch runs as a full load). Every load
-is checked against a fingerprint of the rvmt-pkmq history, which no load
-may change. It also runs
-outside the image (python tests/integration_bigquery.py) when the
-credentials and .env are in place.
+Socrata extracts, four delta windows and one full history. (Against a clone
+whose history has no neighborhoods yet, as before the 2026-10-15 source
+switch, the first delta runs as a full load instead.) Every load is checked
+against a fingerprint of the rvmt-pkmq history, which no load may change.
 
 Every check prints [PASS] or [FAIL]; the process exits non-zero if any
 failed, and the clone is dropped either way.
@@ -168,7 +169,7 @@ def main():
     run_main('--setup')
     cols = {r['column_name'] for r in q(
         f"SELECT column_name FROM {T}.INFORMATION_SCHEMA.COLUMNS WHERE table_name = 'etl_load_log'")}
-    check('setup: log migrations applied',
+    check('setup: etl_load_log has every audit column',
           {'status', 'error_message', 'fact_committed_at', 'crashes_deferred'} <= cols)
     check('setup: lease seeded and free', lease_row()['holder'] is None)
 
@@ -186,26 +187,33 @@ def main():
           and labels['history'] > 0, str(labels))
     stg_cols = {r['column_name'] for r in q(
         f"SELECT column_name FROM {T}.INFORMATION_SCHEMA.COLUMNS WHERE table_name = 'stg_crash_person'")}
-    check('setup: staging rebuilt for 7iz8-ecuw',
+    check('setup: staging has the 7iz8-ecuw shape',
           {'reportnumber', 'agerange', 'snaneighborhood'} <= stg_cols and 'instanceid' not in stg_cols,
           str(sorted(stg_cols)))
     history = history_fingerprint()
     check('setup: labelling added no rows', fact_state()['n_rows'] == history_rows_before)
 
-    # 2. The first delta finds the history never matched to 7iz8-ecuw, so it
-    # runs as a full load: that names the history's neighborhoods and adds
-    # the crashes rvmt-pkmq never had (311 at the switch). It also re-stamps
-    # any 7iz8-ecuw crash in a clone of a production that already loaded
-    # some. What must hold is that it succeeds and the history is untouched;
-    # the no-op proof is the second delta.
+    # 2. The first delta. Production's history was matched to 7iz8-ecuw and
+    # given its neighborhoods on 2026-10-15, so against a clone of it this is
+    # an ordinary delta. Against a clone of an unnamed history (production
+    # restored from crashes_archive_rvmt) it must fall back to a full load,
+    # which names the history and adds the crashes rvmt-pkmq never had.
+    # Either way it must succeed and leave the history untouched; the no-op
+    # proof is the second delta.
+    # The same test Run_Pipeline.delta_watermark makes
+    unnamed = q(f"""SELECT COUNT(*) > 0 AND COUNTIF(neighborhood IS NOT NULL) = 0 AS unnamed
+                    FROM {T}.fact_crash_person WHERE source_dataset = 'rvmt-pkmq'""")[0]['unnamed']
+    expected_mode = 'full' if unnamed else 'delta'
     run_main('--delta')
     first = latest_log()
-    check('delta: first load after the switch runs as a full load and succeeds',
+    check(f'delta: first load succeeds, as a {expected_mode} load '
+          f'(history {"unnamed" if unnamed else "already named"})',
           first['status'] == 'succeeded' and first['fact_committed_at'] is not None
-          and first['load_mode'] == 'full' and first['window_start'] is None,
+          and first['load_mode'] == expected_mode
+          and (first['window_start'] is None) == unnamed,
           f"mode {first['load_mode']}, new {first['crashes_new']}, changed {first['crashes_changed']}, "
           f"removed {first['crashes_removed']}, publish {first['socrata_updated_at']}")
-    check('history: untouched by the first full load', history_fingerprint() == history,
+    check('history: untouched by the first load', history_fingerprint() == history,
           f'{history} -> {history_fingerprint()}')
     named = q(f"""SELECT COUNT(DISTINCT instanceid)                                  AS crashes,
                          COUNT(DISTINCT IF(neighborhood IS NOT NULL, instanceid, NULL)) AS named
@@ -245,13 +253,10 @@ def main():
     check('delta: 7-day target present, only the last week per cell unlabelled',
           tgt['unlabelled'] == tgt['cells'] * 7 and tgt['labelled'] > 0, str(tgt))
 
-    # Distance to downtown, as far as a delta can show it. The clone starts
-    # without the column, and a delta only rewrites the crashes that changed,
-    # so most rows are still NULL here -- the full coverage check runs after
-    # the reprocess below. What must hold already: a distance never appears
-    # without coordinates (0.0 for a missing coordinate would read as "at
-    # Fountain Square"), and wherever one was written it matches the
-    # coordinates stored beside it.
+    # Distance to downtown: a distance never appears without coordinates
+    # (0.0 for a missing coordinate would read as "at Fountain Square"), and
+    # wherever one is written it matches the coordinates stored beside it.
+    # Full coverage is checked after the reprocess below.
     dist = q(f"""SELECT COUNTIF((latitude IS NULL OR longitude IS NULL)
                                 AND distance_to_cbd_m IS NOT NULL) AS spurious,
                         COUNTIF(ABS(distance_to_cbd_m
@@ -551,9 +556,9 @@ def main():
     check('history: untouched by --full --reprocess', history_fingerprint() == history,
           f'{history} -> {history_fingerprint()}')
 
-    # Every crash has now been rewritten, so distance_to_cbd_m must be fully
-    # populated -- this is the state production reaches after --setup plus
-    # --full --reprocess.
+    # The history got its distances before it froze (2026-10-01), and the
+    # reprocess has just rewritten every 7iz8-ecuw crash, so every row with
+    # coordinates must have one.
     dist = q(f"""SELECT COUNTIF(latitude IS NOT NULL AND longitude IS NOT NULL
                                 AND distance_to_cbd_m IS NULL)        AS missing,
                         COUNTIF((latitude IS NULL OR longitude IS NULL)
@@ -593,8 +598,8 @@ def main():
           nearest['cell_scheme'] == 'neighborhood' and nearest['cell_id'] == 'DOWNTOWN'
           and nearest['km'] < 1.0, str(nearest))
 
-    # The panel must keep counting past the history: with the default scheme
-    # both sources land in cells.
+    # The panel's scheme has to be one the history carries: a scheme that is
+    # NULL for it would leave the panel nearly empty.
     span = q(f"""SELECT MAX(day) AS last_day, SUM(crashes) AS crashes FROM {T}.ml_crash_panel""")[0]
     check('panel: built on the neighborhood scheme, with crashes in it', span['crashes'] > 100000, str(span))
 
@@ -604,16 +609,16 @@ def main():
           (log['crashes_new'], log['crashes_changed'], log['crashes_removed']) == (0, 0, 0)
           and log['status'] == 'succeeded', f"{log['crashes_new']}/{log['crashes_changed']}/{log['crashes_removed']}")
 
-    # 9. Last, because it drops and re-creates the lock table
+    # 10. Last, because it drops and re-creates the lock table
     concurrent_bootstrap()
 
 
 def concurrent_bootstrap():
     """Three first-time setups racing must still leave one lock row.
 
-    Runs last, and drops the table first: CREATE and ALTER are metadata
-    operations, and BigQuery rate-limits those per table, so racing them
-    ahead of the real setup made the next --setup fail on quota.
+    Runs last, and drops the table first: CREATE is a metadata operation,
+    and BigQuery rate-limits those per table, so racing them ahead of the
+    real setup made the next --setup fail on quota.
     """
     q(f'DROP TABLE {T}.etl_lease')
     section10 = rp.load_sql_sections(rp.SQL_FILE, config)[10]

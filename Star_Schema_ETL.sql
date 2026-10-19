@@ -81,16 +81,6 @@
 -- malformed value can't fail the load — it lands, and SAFE_CAST quarantines
 -- it where Section 6 can count it. ':' is illegal in BigQuery column names,
 -- so the Socrata system fields are renamed.
---
--- Staging only ever holds the last extract, so a table still shaped for
--- rvmt-pkmq is dropped and recreated rather than migrated.
-IF NOT EXISTS (
-  SELECT 1 FROM crashes.INFORMATION_SCHEMA.COLUMNS
-  WHERE table_name = 'stg_crash_person' AND column_name = 'reportnumber'
-) THEN
-  DROP TABLE IF EXISTS crashes.stg_crash_person;
-END IF;
-
 CREATE TABLE IF NOT EXISTS crashes.stg_crash_person (
   socrata_id                      STRING,   -- :id
   socrata_version                 STRING,   -- :version
@@ -324,39 +314,12 @@ CREATE TABLE IF NOT EXISTS crashes.etl_load_log (
   fact_committed_at    TIMESTAMP            -- when this load's fact transaction committed; NULL = fact untouched
 );
 
--- Migrations for tables created before these columns existed. CREATE TABLE
--- IF NOT EXISTS never alters an existing table, so --setup applies these; on
--- a fresh build they're no-ops.
--- Avoid consuming metadata-update quota when the schema is already current.
-IF NOT EXISTS (
-  SELECT 1 FROM crashes.INFORMATION_SCHEMA.COLUMNS
-  WHERE table_name = 'fact_crash_person' AND column_name = 'crash_hash'
-) THEN
-  ALTER TABLE crashes.fact_crash_person ADD COLUMN IF NOT EXISTS crash_hash STRING;
-END IF;
-
-IF NOT EXISTS (
-  SELECT 1 FROM crashes.INFORMATION_SCHEMA.COLUMNS
-  WHERE table_name = 'fact_crash_person' AND column_name = 'distance_to_cbd_m'
-) THEN
-  ALTER TABLE crashes.fact_crash_person ADD COLUMN IF NOT EXISTS distance_to_cbd_m FLOAT64;
-END IF;
-
-IF (SELECT COUNT(*) FROM crashes.INFORMATION_SCHEMA.COLUMNS
-    WHERE table_name = 'etl_load_log' AND column_name IN (
-      'crashes_new', 'crashes_changed', 'crashes_removed', 'crashes_deferred',
-      'status', 'error_message', 'fact_committed_at')) < 7 THEN
-  ALTER TABLE crashes.etl_load_log
-    ADD COLUMN IF NOT EXISTS crashes_new       INT64,
-    ADD COLUMN IF NOT EXISTS crashes_changed   INT64,
-    ADD COLUMN IF NOT EXISTS crashes_removed   INT64,
-    ADD COLUMN IF NOT EXISTS crashes_deferred  INT64,
-    ADD COLUMN IF NOT EXISTS status            STRING,
-    ADD COLUMN IF NOT EXISTS error_message     STRING,
-    ADD COLUMN IF NOT EXISTS fact_committed_at TIMESTAMP;
-END IF;
-
--- The source switch (2026-10-15)
+-- The source switch (2026-10-15). CREATE TABLE IF NOT EXISTS never alters an
+-- existing table, so --setup adds these columns to a fact built before them
+-- (production did that on 2026-10-15). It stays for one case: the history
+-- restored from crashes_archive_rvmt, which predates them. On a current or
+-- fresh fact it's a no-op, and the INFORMATION_SCHEMA guard keeps it from
+-- spending metadata-update quota.
 IF (SELECT COUNT(*) FROM crashes.INFORMATION_SCHEMA.COLUMNS
     WHERE table_name = 'fact_crash_person'
       AND column_name IN ('source_dataset', 'age_range', 'neighborhood')) < 3 THEN
@@ -1620,16 +1583,12 @@ GROUP BY source_dataset
 ORDER BY source_dataset;
 
 -- Canonicalization coverage. A growing count here means the feed introduced
--- a label the cleaning view's CASE ladders don't recognize.
+-- a label the cleaning view's CASE ladders don't recognize. (Unit type isn't
+-- here: 7iz8-ecuw doesn't publish one, so its count could never move.)
 SELECT 'injury_severity' AS attribute, p.injury_severity AS value, COUNT(*) AS n
 FROM crashes.fact_crash_person f JOIN crashes.dim_person_profile p USING (person_profile_key)
 WHERE p.injury_severity = 'Unknown' AND p.injury_severity_raw IS NOT NULL
 GROUP BY p.injury_severity
-UNION ALL
-SELECT 'unit_category', p.unit_category, COUNT(*)
-FROM crashes.fact_crash_person f JOIN crashes.dim_person_profile p USING (person_profile_key)
-WHERE p.unit_category = 'Other'
-GROUP BY p.unit_category
 UNION ALL
 SELECT 'crash_severity', ct.crash_severity, COUNT(*)
 FROM crashes.fact_crash_person f JOIN crashes.dim_crash_type ct USING (crash_type_key)
@@ -1724,18 +1683,6 @@ SELECT 'pipeline' AS lease_name, CAST(NULL AS STRING) AS holder,
        CAST(NULL AS TIMESTAMP) AS acquired_at, CAST(NULL AS TIMESTAMP) AS heartbeat_at,
        CAST(NULL AS STRING) AS current_job_id;
 
--- Additive upgrade for development tables created by the earlier expiring lease.
--- Any legacy expires_at column is ignored; timestamps never authorize takeover.
--- Guarded by INFORMATION_SCHEMA rather than left as a bare ADD COLUMN IF NOT
--- EXISTS: the ALTER counts against the per-table metadata update limit even
--- when the column is already there, and a few --setup runs in a row then fail
--- with 'too many table update operations for this table'.
-IF NOT EXISTS (
-  SELECT 1 FROM crashes.INFORMATION_SCHEMA.COLUMNS
-  WHERE table_name = 'etl_lease' AND column_name = 'heartbeat_at'
-) THEN
-  ALTER TABLE crashes.etl_lease ADD COLUMN heartbeat_at TIMESTAMP;
-END IF;
 ASSERT (SELECT COUNT(*) FROM crashes.etl_lease) = 1
    AND (SELECT COUNTIF(lease_name = 'pipeline') FROM crashes.etl_lease) = 1
   AS 'etl_lease must contain exactly one pipeline row; inspect before recovery';

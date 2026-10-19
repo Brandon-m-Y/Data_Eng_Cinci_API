@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS crashes.ml_weather_daily (
 -- Static attributes per cell. Keyed by scheme as well as name so each
 -- neighborhood scheme can carry its own rows.
 CREATE TABLE IF NOT EXISTS crashes.ml_cell_attributes (
-  cell_scheme          STRING NOT NULL,   -- 'cpd_neighborhood', ...
+  cell_scheme          STRING NOT NULL,   -- 'neighborhood', 'cpd_neighborhood', ...
   cell_id              STRING NOT NULL,   -- uppercase, as in ml_crash_panel
   road_miles           FLOAT64,           -- OSM; the stand-in exposure
   intersection_count   INT64,
@@ -209,17 +209,6 @@ FROM (SELECT d FROM fixed
       UNION ALL SELECT observed(d) FROM fixed
       UNION ALL SELECT d FROM floating);
 
--- Step 4: the spine. CROSS JOIN every cell with every day, then LEFT JOIN
--- the sparse counts and zero-fill.
--- Step 5: lags are PARTITION BY cell_id (within cell) and strictly
--- backward. The rolling frames end at 1 PRECEDING — the SQL form of the
--- spec's shift(1) before rolling(). A frame ending at CURRENT ROW would
--- include the target in its own feature. The spine is complete, so N rows
--- back is exactly N days back.
--- These are retrospective event-time features. They do not reconstruct which
--- reports/amendments were available at a historical prediction issue time.
--- The end buffer matures targets, not feature availability. Target-day observed
--- weather must not be used as if it were a weather forecast issued beforehand.
 -- Which cells the panel covers. A neighborhood joins only once it has
 -- p_min_cell_crashes crashes across the whole window: one misspelling, or one
 -- crash geocoded into a place the city doesn't really use, would otherwise add
@@ -269,6 +258,18 @@ ASSERT NOT EXISTS (
   WHERE cd.distance_to_cbd_km IS NULL
 ) AS 'A panel cell has no usable coordinates, so its distance to downtown is unknown';
 
+-- Step 4: the spine. CROSS JOIN every cell with every day, then LEFT JOIN
+-- the sparse counts and zero-fill.
+-- Step 5: lags are PARTITION BY cell_id (within cell) and strictly
+-- backward. The rolling frames end at 1 PRECEDING — the SQL form of the
+-- spec's shift(1) before rolling(). A frame ending at CURRENT ROW would
+-- include the target in its own feature. The spine is complete, so N rows
+-- back is exactly N days back.
+-- These are retrospective event-time features. They do not reconstruct which
+-- reports/amendments were available at a historical prediction issue time.
+-- The end buffer matures targets, not feature availability. Target-day observed
+-- weather must not be used as if it were a weather forecast issued beforehand.
+--
 -- The joined tables are backtick-quoted because the target column is named
 -- `crashes`, like the dataset: after FROM grid, a bare crashes.dim_date
 -- would resolve as a field of that column.

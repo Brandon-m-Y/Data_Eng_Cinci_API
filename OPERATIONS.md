@@ -81,7 +81,7 @@ schedule:
  ─────────────────────
  push to main (a non-.md file)
      │
-     ├─► GitHub Actions: `test` job — 51 offline tests on Ubuntu/Python 3.13
+     ├─► GitHub Actions: `test` job — the offline suite on Ubuntu/Python 3.13
      │
      └─► GitHub Actions: `deploy` job — gated on `test` passing
              │  mints a short-lived Google token through Workload
@@ -132,7 +132,7 @@ Identity Federation was configured ([DEPLOY.md](DEPLOY.md) Appendix A) and
 the three variables were set. **Setting `GCP_WIF_PROVIDER` is the switch.**
 
 From that point, any push to `main` touching a non-`.md` file rebuilds the
-image and repoints both jobs, gated only by the 51 offline tests — the
+image and repoints both jobs, gated only by the offline suite — the
 integration suite does not run in CI, because it needs credentials and takes
 about 35 minutes. So: **pushing code now changes production.** Run
 `tests/integration_bigquery.py` locally before pushing a change to the SQL or
@@ -389,7 +389,8 @@ Being specific about this matters more than a green checklist.
 - The watchdog's failure email actually reaches a human inbox.
 - **The Cloud Monitoring alert fires and delivers.** Forced failure at
   21:01:10 UTC, metric point within ~90 s, mail received.
-- 51 offline tests pass on clean Ubuntu with Python 3.13 in CI.
+- The offline suite passes on clean Ubuntu with Python 3.13 in CI, on every
+  push.
 - **The GitHub Actions deploy path**, twice: token minted through federation
   with no stored key, image built and pushed, both jobs repointed by digest.
 - **The CD-built image runs real loads.** Every scheduled load since

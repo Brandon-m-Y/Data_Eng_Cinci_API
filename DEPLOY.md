@@ -76,7 +76,7 @@ the client. WSL 2 is already configured on this machine.
 Also true before you begin:
 
 - You are Owner on `cincinnati-open-crash-data`.
-- The offline suite passes: `python -m unittest discover -s tests` (51 tests).
+- The offline suite passes: `python -m unittest discover -s tests` (59 tests as of 2026-10-19).
   Deploying a red build just moves the failure somewhere harder to see.
 - Nothing else is mid-load. Step 7 takes the writer lock; a local run holding
   it will make the cloud run fail fast on a held lock, which is correct
@@ -722,7 +722,7 @@ gh variable set GCP_DEPLOYER_SA --body "crash-etl-deployer@cincinnati-open-crash
 
 **Setting `GCP_WIF_PROVIDER` is the switch.** From that moment any push to
 `main` touching a non-`.md` file rebuilds the image and repoints both jobs,
-gated only by the 51-test offline suite — the integration suite does not run
+gated only by the offline suite — the integration suite does not run
 in CI. Prove the path once by hand before relying on it:
 
 ```powershell

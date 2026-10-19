@@ -36,9 +36,6 @@ class Config:
 
     @classmethod
     def from_env(cls):
-        staging = os.getenv('GCP_STAGING_TABLE')
-        if staging and staging != STAGING_TABLE:
-            raise ValueError(f'GCP_STAGING_TABLE is no longer configurable; the SQL uses {STAGING_TABLE}')
         return cls(
             project=os.getenv('GCP_PROJECT_ID', ''),
             dataset=os.getenv('GCP_DATASET') or 'crashes',

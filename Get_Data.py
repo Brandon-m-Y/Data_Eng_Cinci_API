@@ -34,8 +34,8 @@ METADATA_ENDPOINT = f'https://data.cincinnati-oh.gov/api/views/{DATASET_ID}.json
 PAGE_SIZE = 50000
 
 # The v3 endpoint ignores $limit/$offset on a GET and returns the whole
-# dataset (~435 MB) in one response. Paging only works through a POSTed SoQL
-# body, which is what fetch() uses.
+# dataset (~435 MB for rvmt-pkmq) in one response. Paging only works through
+# a POSTed SoQL body, which is what fetch() uses.
 
 # Every column the feed returns. Socrata omits null fields from each JSON row,
 # so without this list a page where a column is entirely null would drop it.
@@ -189,7 +189,6 @@ def _fetch_once(session, where, since, page_size):
         'expected_rows': before[0], 'publish_stamp': before[1], 'since': since,
         'rows_updated_at': metadata_before[0],
     }
-    frame.attrs['rows_updated_at'] = metadata_before[0]
     return frame
 
 
