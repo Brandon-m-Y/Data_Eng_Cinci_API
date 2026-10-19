@@ -298,7 +298,7 @@ region as the BigQuery dataset.
 | Resource | Name | Notes |
 |---|---|---|
 | Artifact Registry | `crash-etl` | Docker, `us-east1` |
-| Image | `us-east1-docker.pkg.dev/cincinnati-open-crash-data/crash-etl/crash-etl` | Built by GitHub Actions on every non-docs push and deployed by digest. As of 2026-10-19: `sha256:6463e69f…`, tagged `f4a995b` |
+| Image | `us-east1-docker.pkg.dev/cincinnati-open-crash-data/crash-etl/crash-etl` | Built by GitHub Actions on every non-docs push and deployed by digest, tagged with the commit. `gcloud run jobs describe crash-etl-delta --region=us-east1` shows the current one |
 | Cloud Run Job | `crash-etl-delta` | `--delta`, 1 GiB, 1 CPU, 30 min |
 | Cloud Run Job | `crash-etl-full` | `--full`, 4 GiB, 2 CPU, 1 h |
 | Scheduler | `crash-etl-delta-mon-sat` | `0 6 * * 1-6` America/New_York |
