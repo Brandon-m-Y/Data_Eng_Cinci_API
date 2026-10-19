@@ -8,7 +8,7 @@ the feed comes from and what its quirks are — several alerts here only make
 sense once you know the feed republishes without adding data.
 
 Deployed and verified end to end on 2026-10-02. **Source switched on
-2026-10-15** — see the next section first.
+2026-10-15**; the next section has what that changed.
 
 ---
 
@@ -18,7 +18,9 @@ The 06:00 delta on 2026-10-15 failed both attempts with `403 Forbidden` on
 the first request to `rvmt-pkmq`: the city had made the dataset private. The
 alert and the watchdog both mailed, as designed, and both triggers were paused
 the same day. The replacement feed is `7iz8-ecuw`; README.md § The source
-switch has the column mapping and what the pipeline now does with it.
+switch has the column mapping and what the pipeline now does with it. The
+migration was rolled out that evening and the triggers resumed; every
+scheduled load since has succeeded.
 
 What changes operationally:
 
@@ -26,10 +28,11 @@ What changes operationally:
   frozen and no longer rebuildable from any feed. A backup copy of the fact,
   the four dimensions and `etl_load_log` is in the dataset
   `crashes_archive_rvmt`, taken 2026-10-15 and verified row for row.
-- **The first load must be a full one.** It matches the history to the new
-  feed and names its neighborhoods, which the ML panel needs. A scheduled
-  delta does this on its own — it falls back to a full load while the
-  history is unnamed — but running it by hand once lets you verify it.
+- **The history's neighborhoods come from a full load.** A full load
+  matches the history to the new feed by report number and fills its
+  `neighborhood`, which the ML panel needs. That happened on 2026-10-15. If
+  the history is ever restored from the backup it arrives without them, and
+  a scheduled delta then falls back to a full load on its own.
 - **The new feed adds nothing until about 2026-10-31.** Its data stops at
   2026-08-24, like the history, while the police department changes
   reporting systems. Loads succeed and find nothing new until then.
@@ -40,13 +43,20 @@ What changes operationally:
   from the new reporting system may use other labels; Section 6's coverage
   check lists any it doesn't recognise.
 
-### Rollout
+### Rollout (done 2026-10-15)
+
+`crash-etl-full-hdgmr` loaded the 311 crashes the history lacks (655 rows),
+named 220,957 history crashes, and left every history row identical to the
+backup. The steps are kept because steps 3 to 5 are also how to bring the
+pipeline back after restoring the history from `crashes_archive_rvmt`.
 
 1. Run the integration suite locally (it clones production into a throwaway
    dataset and deletes it): `python tests/integration_bigquery.py`.
 2. Push to `main`. CI runs the offline suite and repoints both jobs.
 3. Run setup and the first full load once, by hand:
-   `gcloud run jobs execute crash-etl-full --region=us-east1 --args=--setup,--full --wait`
+   `gcloud run jobs execute crash-etl-full --region=us-east1 --args="--setup,--full" --wait`
+   Keep the quotes: in PowerShell an unquoted comma makes an array, and the
+   job receives `--setup --full` as one argument and exits in argparse.
 4. Check the run: the newest `etl_load_log` row is `succeeded` with
    `load_mode = 'full'`; `fact_crash_person` still has 433,160 rows with
    `source_dataset = 'rvmt-pkmq'`, and all but ~332 of their crashes have a
@@ -124,7 +134,7 @@ the three variables were set. **Setting `GCP_WIF_PROVIDER` is the switch.**
 From that point, any push to `main` touching a non-`.md` file rebuilds the
 image and repoints both jobs, gated only by the 51 offline tests — the
 integration suite does not run in CI, because it needs credentials and takes
-about thirty minutes. So: **pushing code now changes production.** Run
+about 35 minutes. So: **pushing code now changes production.** Run
 `tests/integration_bigquery.py` locally before pushing a change to the SQL or
 the runner.
 
@@ -154,7 +164,7 @@ overlap: Sunday is the full load, Monday–Saturday is the delta.
 A delta covers crashes within 90 days of the newest loaded crash
 (`DELTA_LOOKBACK_DAYS`, default 90). A full load covers all history. The
 weekly full load exists to bound how far a missed or partial delta can drift,
-and costs about 2.5 minutes.
+and takes about 4 minutes in Cloud Run.
 
 ### Job sizing
 
@@ -288,7 +298,7 @@ region as the BigQuery dataset.
 | Resource | Name | Notes |
 |---|---|---|
 | Artifact Registry | `crash-etl` | Docker, `us-east1` |
-| Image | `us-east1-docker.pkg.dev/cincinnati-open-crash-data/crash-etl/crash-etl` | Deployed by digest `sha256:fb7fbf44…`, tagged `7ade673`. Built and pointed at by GitHub Actions |
+| Image | `us-east1-docker.pkg.dev/cincinnati-open-crash-data/crash-etl/crash-etl` | Built by GitHub Actions on every non-docs push and deployed by digest. As of 2026-10-19: `sha256:6463e69f…`, tagged `f4a995b` |
 | Cloud Run Job | `crash-etl-delta` | `--delta`, 1 GiB, 1 CPU, 30 min |
 | Cloud Run Job | `crash-etl-full` | `--full`, 4 GiB, 2 CPU, 1 h |
 | Scheduler | `crash-etl-delta-mon-sat` | `0 6 * * 1-6` America/New_York |
@@ -382,21 +392,19 @@ Being specific about this matters more than a green checklist.
 - 51 offline tests pass on clean Ubuntu with Python 3.13 in CI.
 - **The GitHub Actions deploy path**, twice: token minted through federation
   with no stored key, image built and pushed, both jobs repointed by digest.
-- **The CD-built image starts in Cloud Run** — the forced failure ran on
-  `sha256:fb7fbf44…`, so it pulls and runs Python correctly.
+- **The CD-built image runs real loads.** Every scheduled load since
+  2026-10-03 has run on an image GitHub Actions built.
+- **The write path in Cloud Run.** `crash-etl-full` has run every Sunday
+  since 2026-10-04. The 2026-10-11 full load added 13 crashes, rewrote 81
+  and removed 13; the source switch on 2026-10-15 inserted 655 rows.
 
 **Not yet exercised:**
 
-- **The full write path in Cloud Run.** Every load so far has found zero
-  changes, because the feed has added no new crash days since 2026-08-24.
-  Inserts, deletions and the deletion cap have not run in the cloud. The first
-  Sunday full load is the real test.
-- The `crash-etl-full` job has never run at all — only `crash-etl-delta`.
-- **The CD-built image doing a real load.** It starts correctly, but the
-  only thing it has run is a deliberate crash in `argparse`. No file the
-  Dockerfile copies changed between it and the smoke-tested digest, so it
-  should behave identically — Saturday's 06:00 delta is what will show that.
+- **The deletion cap in the cloud.** Only the integration suite has tripped
+  it.
 - Recovery from a genuinely stuck lease, which has only been reasoned about.
+- Rows from the police department's new reporting system, expected after
+  2026-10-31.
 
 ---
 
@@ -474,7 +482,6 @@ things it added have been proven rather than assumed: the alert has fired
 and delivered, and the deploy job has built and repointed twice. The local
 key is destroyed.
 
-- **Roll out the source switch** — see [The source switch](#the-source-switch-2026-10-15).
 - **Watch the first load with new-system data** (expected after 2026-10-31)
   — the first crashes the history doesn't already have, and the first rows
   from the police department's new reporting system.

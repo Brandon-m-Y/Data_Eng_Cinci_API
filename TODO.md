@@ -3,10 +3,6 @@
 Completed work isn't listed here. The reasoning behind decisions already made
 lives in README.md under "Design decisions"; the audits are in AUDIT.md.
 
-**Pending in production:** the 2026-10-15 source switch (`rvmt-pkmq` →
-`7iz8-ecuw`). The code is written; the rollout steps are in OPERATIONS.md,
-The source switch. Both triggers are paused until it is done.
-
 ## Watch
 
 - **The first rows from CPD's new reporting system** (expected after
@@ -85,23 +81,8 @@ with a verification. README.md § Deployment has the design. This list is only
 what is still undone and what DEPLOY.md does not decide for you.
 
 Decided: `--delta` Monday–Saturday and `--full` Sunday, both 06:00
-America/New_York. A full load is ~2.5 minutes, so weekly costs essentially
+America/New_York. A full load is ~4 minutes, so weekly costs essentially
 nothing and bounds how far a missed delta can drift.
-
-Written and validated, not yet installed:
-
-- `deploy/watchdog.sql` — daily health check, 14:00 UTC, a few hours after
-  the load. Validated against production on 2026-10-02: the healthy path
-  returns `ok`, and all four guards were made to fire against simulated data,
-  so the messages are known to be correct.
-- `deploy/create_watchdog.py` — manages it. It cannot *create* a user-owned
-  config: the API wants an OAuth authorization code that application-default
-  credentials do not carry, so creation happens in the BigQuery console. It
-  does handle `--update`, `--test-alert` and reporting.
-- `.github/workflows/deploy.yml` — build and deploy on push to `main`. Gated
-  on the offline suite. Needs Workload Identity Federation (DEPLOY.md Appendix
-  A) before it can run; until then it fails at the auth step and nothing else
-  is affected.
 
 Every step is done as of 2026-10-02. Kept as a record of what each one
 proved, because "installed" and "working" came apart more than once:
@@ -130,16 +111,11 @@ same shape of gap the watchdog email had. Both are now closed:
       failure cost nothing: no lease acquired, no `etl_load_log` row, and the
       metric recorded `1`, confirming it counts executions rather than the
       two task attempts.
-- [x] The deploy job has run twice and both jobs sit on the digest it built
-      (`sha256:fb7fbf44...`, tag `7ade673`). The forced failure above ran on
-      that image, so it pulls and starts; what it has not done is a real
-      load. Saturday's 06:00 delta is the first.
-
-Watch next:
-
-- **Saturday 06:00 ET** — first scheduled delta on the CI-built image.
-- **Sunday 06:00 ET** — first `--full` ever, and the first exercise of
-  inserts, deletions and the deletion cap in the cloud.
+- [x] The deploy job has run on every non-docs push since its first build
+      (`sha256:fb7fbf44...`, tag `7ade673`), and every scheduled load since
+      2026-10-03 has run on an image it built. The first `--full` ran
+      2026-10-04, and the 2026-10-11 one was the first to insert and delete
+      in the cloud.
 
 Still open:
 
@@ -149,8 +125,8 @@ Still open:
   is the reversible way to find out whether anything still depends on it.
 - Whether the deploy job should need a human. One environment, one branch,
   and only the offline suite between a push and production. A GitHub
-  Environment with required reviewers would add a click; worth deciding
-  after the first full load, not before.
+  Environment with required reviewers would add a click. The first full
+  loads have run, so this is ready to decide.
 
 ## Deferred
 

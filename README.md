@@ -24,7 +24,7 @@ the source, each discovered the expensive way:
   privacy. Including them in the change hash made every republish rewrite the
   entire dataset. They are excluded from it.
 
-**What exists today:** 221,289 crashes and 433,160 person-rows in a Kimball
+**What exists today:** 221,600 crashes and 433,815 person-rows in a Kimball
 star schema, plus a complete neighborhood × day panel with
 leakage-safe lag features and a forecast label. It runs as a container on
 Cloud Run under a single-writer lease, writes an audit row for every run, and
@@ -267,24 +267,24 @@ the public endpoint and keeps a derived copy in a private BigQuery dataset.
 
 ## Current state
 
-**The pipeline is deployed and running unattended.** As of 2026-10-02,
+**The pipeline is deployed and running unattended.** As of 2026-10-19,
 BigQuery dataset `crashes` in `us-east1`:
 
 | Object                                       | Type   |    Rows | Notes                                                                                                                                                     |
 | -------------------------------------------- | ------ | ------: | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `stg_crash_person`                         | table  |   6,790 | Raw feed, all STRING; replaced every load, so it holds whatever the **last** load fetched — currently a 90-day delta window, not the full history |
+| `stg_crash_person`                         | table  |   7,015 | Raw feed, all STRING; replaced every load, so it holds whatever the **last** load fetched — currently a 90-day delta window, not the full history |
 | `vw_stg_crash_person_clean`                | view   |         | The one place cleaning happens                                                                                                                            |
-| `fact_crash_person`                        | table  | 433,160 | One row per person/unit per crash; 221,289 crashes, 1900-02-06 to 2026-08-24                                                                              |
+| `fact_crash_person`                        | table  | 433,815 | One row per person/unit per crash; 221,600 crashes, 1900-02-06 to 2026-08-24, of which 433,160 rows and 221,289 crashes are the frozen `rvmt-pkmq` history |
 | `dim_date`                                 | table  |   9,497 | 2010-01-01 to 2035-12-31, plus the unknown member                                                                                                         |
 | `dim_time`                                 | table  |   1,441 | Minute grain, plus the unknown member                                                                                                                     |
-| `dim_location`                             | table  |  63,021 | Insert-only, so it grows as amended addresses arrive                                                                                                      |
-| `dim_conditions`                           | table  |   1,977 | Junk dimension                                                                                                                                            |
-| `dim_crash_type`                           | table  |      72 |                                                                                                                                                           |
-| `dim_person_profile`                       | table  |   3,914 | Junk dimension                                                                                                                                            |
+| `dim_location`                             | table  |  63,332 | Insert-only, so it grows as amended addresses arrive                                                                                                      |
+| `dim_conditions`                           | table  |   2,049 | Junk dimension                                                                                                                                            |
+| `dim_crash_type`                           | table  |     106 |                                                                                                                                                           |
+| `dim_person_profile`                       | table  |   4,037 | Junk dimension                                                                                                                                            |
 | `dim_crash_date`, `dim_reported_date`    | views  |         | Role-playing views over`dim_date`                                                                                                                       |
-| `etl_load_log`                             | table  |      10 | One row per load, with its status, counts and timings                                                                                                     |
+| `etl_load_log`                             | table  |      29 | One row per load, with its status, counts and timings                                                                                                     |
 | `etl_lease`                                | table  |       1 | Which run may write; created by`--setup`                                                                                                                |
-| `ml_crash_panel`                           | table  | 205,746 | 53 neighborhoods × 3,882 days                                                                                                                            |
+| `ml_crash_panel`                           | table  | 194,100 | 50 neighborhoods × 3,882 days                                                                                                                            |
 | `ml_weather_daily`, `ml_cell_attributes` | tables |       0 | Schema ready; external data not loaded yet                                                                                                                |
 
 **Where things stand:**
@@ -300,12 +300,13 @@ BigQuery dataset `crashes` in `us-east1`:
   service-account key was destroyed 2026-10-02 and local runs use
   application-default credentials.
   [OPERATIONS.md](OPERATIONS.md) is the working description.
-- **Production matches the repository.** The last migration (`--setup`, then
-  `--full --reprocess`) ran 2026-10-01: all 221,289 crashes rewritten in
-  4m58s, `distance_to_cbd_m` populated for every row that has coordinates,
-  and the 176 single-coordinate rows resolved. Every load since has reported
-  0 new, 0 changed and 0 removed — correctly, because the feed has published
-  no new crash day since 2026-08-24.
+- **Production matches the repository.** The last migration was the source
+  switch (`--setup`, then `--full`) on 2026-10-15: 311 crashes the history
+  lacked loaded from `7iz8-ecuw` (655 rows), 220,957 history crashes given
+  their neighborhood, and every history row checked identical to the
+  `crashes_archive_rvmt` backup afterwards. Every load since has reported
+  0 new, 0 changed and 0 removed — correctly, because neither feed has
+  published a crash day after 2026-08-24.
 - **ML:** the panel is built and validated, and carries its forecast label.
   External features (weather, AADT, population) and model training are not
   started. The measured 39-day publication lag makes this harder than first
@@ -313,10 +314,12 @@ BigQuery dataset `crashes` in `us-east1`:
   the crash history available at forecast time ends 40 days back.
 
 **What has not happened yet.** Worth stating plainly, because a green
-checklist hides it: **the full write path has never run in the cloud.**
-Every load so far found zero changes, so inserts, deletions and the deletion
-cap have only ever executed locally. The `crash-etl-full` job has never run
-at all. The first Sunday full load is the real test.
+checklist hides it. The write path has now run in the cloud: the 2026-10-11
+full load added 13 crashes, rewrote 81 and removed 13, and the 2026-10-15
+switch inserted 655 rows. But **the deletion cap has never tripped outside
+the integration suite**, a stuck lease has never been recovered for real,
+and no row from the police department's new reporting system has arrived
+yet (expected after 2026-10-31).
 
 **Verified behavior.** The whole suite runs against a fresh clone of
 production (`tests/integration_bigquery.py`, 69 checks since the 2026-10-15
@@ -614,12 +617,14 @@ Measured in the container on 2026-09-19:
 | `--delta` |        6,791 |                             183 MB |     ~90 s |
 | `--full`  |      433,160 | 1.76 GB before the BigQuery upload |    ~155 s |
 
-Planned job settings:
+Job settings, as deployed:
 
-- **Memory:** 4 GiB, which leaves headroom over the 1.76 GB full-load peak.
-- **Task timeout:** 1 hour. The 10-minute default is too tight given the
-  600-second page timeouts. BigQuery's 30-minute job timeout is best effort;
-  it does not establish that a writer has stopped. Writer ownership never expires.
+- **Memory and CPU:** 1 GiB and 1 CPU for the delta; 4 GiB and 2 CPUs for
+  the full load, which leaves headroom over its 1.76 GB peak.
+- **Task timeout:** 30 minutes for the delta, 1 hour for the full load. The
+  10-minute default is too tight given the 600-second page timeouts.
+  BigQuery's 30-minute job timeout is best effort; it does not establish
+  that a writer has stopped. Writer ownership never expires.
 - **Retries:** 1. A load that fails cleanly — a source error, a failed
   BigQuery job — releases the writer lock on its way out, so the retry is a
   full second attempt and needs nobody. Only an unresolved outcome (SIGKILL, a
@@ -645,8 +650,10 @@ Planned job settings:
     until the next day.
   - `socrata_updated_at` unchanged for 21 days, which means the city stopped
     publishing. Deltas keep succeeding against an unchanged publication, so
-    the other guards stay quiet while the data ages. The publishes seen so far
-    were 9, 12 and 1 days apart, making 21 days a safe two missed publishes.
+    the other guards stay quiet while the data ages. `rvmt-pkmq` published 9,
+    12 and 1 days apart, making 21 days a safe two missed publishes.
+    `7iz8-ecuw` has published daily since the switch; the threshold can
+    tighten once the new reporting system's cadence is known.
   - Newest `crash_date` more than 60 days old, which means the feed is
     republishing without adding crash days. Not redundant with the guard
     above: on 2026-10-02 a fresh publish arrived, changed the stamp,
@@ -746,8 +753,8 @@ The delta therefore windows on **crash date**:
   fact itself and capped at today. A failed run leaves no state to reset. If
   the fact is empty, a delta runs as a full load.
 - **Why 90 days:** 99% of reports are filed within 3.7 days of the crash, and
-  only 0.08% take more than 90. A delta pulls about 6,800 rows instead of
-  433K.
+  only 0.08% take more than 90. A delta pulls about 7,000 rows instead of
+  450K.
 - **No stable row key.** Socrata regenerates every `:id` and `:version` when
   it republishes the dataset, so neither can key the fact. `instanceid`
   survives republishes, but nothing identifies a person within a crash, so
@@ -805,7 +812,7 @@ The delta therefore windows on **crash date**:
   written inside the fact transaction, so a fact change always has one.
 
 A delta only catches amendments to crashes inside the window. Run `--full`
-regularly (the schedule plans weekly or monthly) to catch older ones and
+regularly (the schedule runs one every Sunday) to catch older ones and
 anything a delta deferred.
 
 ---
@@ -823,7 +830,10 @@ The source is at that grain:
 | `instanceid`    |         221,289 | Crash level; degenerate dimension and the load's key      |
 | `localreportno` |         221,289 | Crash level, 1:1 with`instanceid`; degenerate dimension |
 
-That works out to about 1.96 people per crash.
+That works out to about 1.96 people per crash. These are the `rvmt-pkmq`
+history's figures. `7iz8-ecuw` has no `instanceid`, so its crashes carry
+the report number in both columns (see
+[The source switch](#the-source-switch-2026-10-15)).
 
 ### Fact table: `fact_crash_person`
 
@@ -831,17 +841,19 @@ That works out to about 1.96 people per crash.
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Foreign keys          | `crash_date_key`, `reported_date_key` (both role-play `dim_date`), `crash_time_key`, `location_key`, `conditions_key`, `crash_type_key`, `person_profile_key` |
 | Degenerate dimensions | `instanceid`, `localreportno`                                                                                                                                             |
+| Source                | `source_dataset`: `rvmt-pkmq` (the frozen history) or `7iz8-ecuw`                                                                                                         |
 | Source row id         | `socrata_id` (`:id`); informational only, since it changes on every republish                                                                                             |
 | Measures              | `person_count` (always 1), `is_injured`, `is_fatal`                                                                                                                     |
-| Other                 | `age`, `latitude`, `longitude`, `distance_to_cbd_m`, `crash_date`, `crash_datetime`, `reporting_lag_hours`                                                      |
+| Other                 | `age`, `age_range`, `neighborhood`, `latitude`, `longitude`, `distance_to_cbd_m`, `crash_date`, `crash_datetime`, `reporting_lag_hours`                          |
 | Audit                 | `socrata_version`, `socrata_updated_at`, `loaded_at`, `crash_hash` (change detection)                                                                                 |
 
 - **Measures** are INT64 0/1 rather than BOOL, so they add up: `SUM(is_fatal)`
   counts fatalities and `AVG(is_injured)` gives an injury rate.
 - **`is_injured`** means "possible injury" or worse. **`is_fatal`** means
   fatal.
-- **Raw age** stays on the fact. It's validated to 0–110; values like `BB`,
-  `NN` and `913` become NULL.
+- **Raw age** stays on the fact for the history (`7iz8-ecuw` publishes only
+  a range, which goes in `age_range` for both sources). It's validated to
+  0–110; values like `BB`, `NN` and `913` become NULL.
 - **Lat/long** is per unit and lives on the fact, not the dimension. Values
   outside Hamilton County's bounds become NULL, **as a pair**: half a
   coordinate is not a location, and leaving one axis behind makes a row read
@@ -917,7 +929,7 @@ cell × day rows adds the negatives: days with no crash appear as `crashes = 0`.
 
 | Setting     | Value                                 | Reason                                                                                                                                                                                                                                                    |
 | ----------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Cell        | CPD neighborhood (53;`N/A` dropped) | Spec v1. SNA (51) and community council (71) can be switched in.                                                                                                                                                                                          |
+| Cell        | `neighborhood` (50; `Unknown or Outside of City Limits` dropped) | The SNA neighborhoods as `7iz8-ecuw` names them, filled for the history by report number: the only scheme that spans both sources. CPD (53, the v1 cell until the source switch), `rvmt-pkmq`'s SNA (51) and community council (71) can be switched in for the history alone. |
 | Time        | Day                                   | Spec v1                                                                                                                                                                                                                                                   |
 | Start       | 2016-01-01                            | The feed starts Nov 2012. Mid-2013 to mid-2014 runs about 800 crashes a month against 1,300+ either side, which is a reporting shift, and 2015 is still ramping up. From 2016 volume is stable. The Mar–May 2020 COVID dip is real and stays in.         |
 | End         | Newest crash date − 7 days           | The newest day in the feed is partial (2026-08-24 had 1 crash against about 38 a day).                                                                                                                                                                    |
@@ -970,18 +982,20 @@ observed holidays match, plus the 14 actual dates that fell on weekends.
 
 ### Current results
 
+On the `neighborhood` scheme, as built 2026-10-19:
+
 | Metric                                         |                     Value | Spec expected                          |
 | ---------------------------------------------- | ------------------------: | -------------------------------------- |
-| Rows                                           |                   205,746 | ~180K                                  |
-| Cells × days                                  |               53 × 3,882 |                                        |
-| Mean crashes per cell-day                      |                      0.84 | ~0.8                                   |
-| Zero fraction                                  |                     53.8% | 50–70%                                |
-| Dispersion (variance ÷ mean)                  |                      1.81 | Overdispersed, so Poisson is the floor |
-| Rows by split (train / valid / test)           | 154,866 / 19,398 / 31,482 |                                        |
-| Labelled rows (`crashes_next_7` not NULL)    |                   205,375 | 371 unlabelled = 53 cells × 7 days    |
-| Mean`crashes_next_7`                         |                      5.88 | ~6, the reason for the weekly horizon  |
-| Zero fraction of`crashes_next_7`             |                     11.6% | Far below the 53.8% of the daily count |
-| Distance to downtown, nearest → farthest cell |          0.14 → 15.43 km | C.B.D./Riverfront → Sayler Park       |
+| Rows                                           |                   194,100 | ~180K                                  |
+| Cells × days                                  |               50 × 3,882 |                                        |
+| Mean crashes per cell-day                      |                      0.89 | ~0.8                                   |
+| Zero fraction                                  |                     52.5% | 50–70%                                |
+| Dispersion (variance ÷ mean)                  |                      1.85 | Overdispersed, so Poisson is the floor |
+| Rows by split (train / valid / test)           | 146,100 / 18,300 / 29,700 |                                        |
+| Labelled rows (`crashes_next_7` not NULL)    |                   193,750 | 350 unlabelled = 50 cells × 7 days    |
+| Mean`crashes_next_7`                         |                      6.22 | ~6, the reason for the weekly horizon  |
+| Zero fraction of`crashes_next_7`             |                     10.5% | Far below the 52.5% of the daily count |
+| Distance to downtown, nearest → farthest cell |          0.06 → 15.75 km | Downtown → Sayler Park                 |
 
 ### Not loaded yet
 
@@ -1006,8 +1020,8 @@ feed:
 | Check                          | Expected                                                                                                                                                                                                            |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Rows routed to unknown members | Crash dates 7 (5 NULL`crashdate` + 2 dated 1900), reported dates 7, times 5. **Location, conditions, crash type and person profile must be 0**; Section 5 fails a load that would add one.                  |
-| Grain                          | `persons_per_crash` about 1.96 (near 1.0 means staging was deduped on `instanceid`). `multi_date_crashes` 0: crashes whose person rows carry different dates, which deltas defer. `repeated_socrata_ids` 0. |
-| Source quality                 | NULL or invalid ages (about 55K), reported-before-crash (16), reported more than 30 days later (796). These measure the feed, not a bug; watch for jumps.                                                           |
+| Grain                          | Per source. `persons_per_crash` about 1.96 for the history (near 1.0 means staging was deduped on the crash key); `crashes_without_neighborhood` 332 for the history. `multi_date_crashes` 0: crashes whose person rows carry different dates, which deltas defer. `repeated_socrata_ids` 0. |
+| Source quality                 | Per source. NULL or invalid ages (about 55K in the history, and every `7iz8-ecuw` row, which publishes `age_range` instead), reported-before-crash (16), reported more than 30 days later (796). These measure the feed, not a bug; watch for jumps.                                                           |
 | Canonicalization coverage      | Values falling into`Unknown` / `Other` while the raw value is present. A growing count means the feed introduced a new label.                                                                                   |
 | Coding-era split               | Both eras present, with comparable injury rates.                                                                                                                                                                    |
 
@@ -1051,8 +1065,9 @@ feed:
 - **Socrata omits NULL fields** from JSON rows, so `fetch()` reindexes to a
   fixed column list.
 - **`:` and `_x` in column names.** System fields (`:id`, `:version`, ...) are
-  illegal in BigQuery and are renamed to `socrata_*`. The `address_x` /
-  `latitude_x` / `longitude_x` suffixes are merge leftovers and are dropped.
+  illegal in BigQuery and are renamed to `socrata_*`. `rvmt-pkmq`'s
+  `address_x` / `latitude_x` / `longitude_x` suffixes were merge leftovers
+  and were dropped; `7iz8-ecuw` has none.
 - **Junk values:**
 
   - ages like `BB`, `NN` and `913`
@@ -1087,7 +1102,7 @@ feed:
 | Downtown anchored at Fountain Square, verified against the data             | Fountain Square (39.1011, −84.5125) is Cincinnati's central public square and the conventional centre of the CBD, so it needs no arbitrary choice to defend. It was checked against this dataset rather than taken on trust: the median coordinate of the 5XX VINE ST block (Fountain Square's own block, n=256) is 70 m away, and the median of the whole`C. B. D. / RIVERFRONT` neighborhood (n=30,766) is 120 m away. Both independent estimates land inside the published coordinate fuzz, which is as close as this data can resolve.                                                                                                                                                                                                        |
 | Distance kept raw per row, aggregated to a median per cell                  | The two uses need different treatment. On the fact the honest thing is the row's own distance, left noisy and documented as such. In the panel a feature has to be stable, so the cell's centre is the marginal median of its crash coordinates — the fuzz (~106 m) and the ~3.7% of rows that sit over 2 km from their own address block both wash out of a median over hundreds of crashes, where a mean would chase them.                                                                                                                                                                                                                                                                                                                        |
 | Panel is a table, not a view                                                | Training reads a stable snapshot, reads are cheap, and publishing waits for the assertions to pass.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Forecast target is the next 7 days per`cpd_neighborhood`                  | Daily counts at neighborhood grain are too sparse to model: 0.84 per cell-day with 54% zeros, so a next-day model predicts 0 or 1 and shows no skill over a seasonal baseline. Weekly totals average ~6 per cell.`cpd_neighborhood` is the reporting agency's own geography and the least sparse of the three schemes. Since the 2026-10-15 source switch the default cell is `neighborhood` instead: `7iz8-ecuw` has no CPD neighborhood, and `neighborhood` (its SNA names, filled for the history by report number) is the only scheme that spans both sources. The panel carries the label as `crashes_next_7` (NULL for the last 7 days, where the window would return a short sum), checked on every build against a recomputation from the following seven days. The panel stays event-time, so lagging the features to the forecast issue time and swapping observed weather for a forecast belong in the training code, where the issue time is known. See `crash-panel-spec.md`. |
+| Forecast target is the next 7 days per neighborhood                         | Daily counts at neighborhood grain are too sparse to model: 0.89 per cell-day with 52% zeros, so a next-day model predicts 0 or 1 and shows no skill over a seasonal baseline. Weekly totals average ~6 per cell.`cpd_neighborhood` is the reporting agency's own geography and the least sparse of the three schemes. Since the 2026-10-15 source switch the default cell is `neighborhood` instead: `7iz8-ecuw` has no CPD neighborhood, and `neighborhood` (its SNA names, filled for the history by report number) is the only scheme that spans both sources. The panel carries the label as `crashes_next_7` (NULL for the last 7 days, where the window would return a short sum), checked on every build against a recomputation from the following seven days. The panel stays event-time, so lagging the features to the forecast issue time and swapping observed weather for a forecast belong in the training code, where the issue time is known. See `crash-panel-spec.md`. |
 | A neighborhood joins the panel after 100 crashes, not on first sight        | One misspelling, or one crash geocoded into a place the city doesn't use, would otherwise add a cell that is almost entirely zeros and drag down every pooled model. The threshold is self-maintaining, where a fixed list would need editing whenever the city changes its geography, and the panel report prints every held-out neighborhood with its count so a real one sitting just under the line stays visible.                                                                                                                                                                                                                                                                                                                               |
 | Panel is fully rebuilt each load, not incrementally                         | Rolling features and zero-filled cells depend on neighboring days. A late or amended crash changes`lag_7`, `roll_28`, `roll_91` and `lag_364` for up to a year of later rows in its cell. At about 200K rows a rebuild takes seconds, while an incremental version would need to recompute a trailing window anyway.                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Holidays flag both actual and observed dates                                | July 4 traffic happens on the 4th even when the day off is the 3rd.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -1103,6 +1118,8 @@ feed:
 | `Pipeline_Config.py`            | Validated project, dataset and location; rewrites`crashes.` in the SQL to the configured dataset; best-effort job time limit.                                                                                                                          |
 | `Star_Schema_ETL.sql`           | Transform: DDL, cleaning view, staging validation, merges, fact load, checks, views, audit log, lease.                                                                                                                                                   |
 | `ML_Crash_Panel.sql`            | ML panel: external feature tables, the ASSERT-gated panel build, and a report.                                                                                                                                                                           |
+| `Build_ERD.py`                  | Draws the star schema from the DDL in Section 1 of `Star_Schema_ETL.sql` (`--scope all` adds staging and the ETL tables). Needs the dev requirements and a Graphviz install.                                                                         |
+| `docs/ERD_*`                    | The generated diagrams: `.svg`, eralchemy's `.er`, and a mermaid `.md` GitHub renders. Rerun `Build_ERD.py` after changing the DDL.                                                                                                                     |
 | `Run_Pipeline.py`               | Orchestration and CLI. Holds the lease, runs the SQL section by section, passes query parameters and records the outcome.                                                                                                                                |
 | `tests/test_regressions.py`     | Offline tests (no credentials or network): extraction checks, staging schema, config and rendering, label grammar, CLI rules.`python -m unittest discover -s tests`                                                                                    |
 | `tests/test_lock_safety.py`     | Offline tests for the writer lock: acquisition, outcome tracking, and the takeover attempts that must fail. Same runner.                                                                                                                                 |
@@ -1133,19 +1150,17 @@ The two SQL files are run section by section; what is in each one is the
 - **After changing the cleaning view** (or a derived column in Section 4),
   run `--full --reprocess`. The hash is built from raw values, so an ordinary
   load leaves unchanged crashes and existing dimension members on the old
-  logic. The fact stays queryable throughout, since every crash is rewritten
-  inside one transaction. Rules that feed a natural key (age bands, location
-  cleanup) create new members instead, and the old ones stay behind unused.
+  logic. Only `7iz8-ecuw` crashes are rewritten: the `rvmt-pkmq` history keeps
+  the logic it was loaded with, since its feed is gone. The fact stays
+  queryable throughout, since every rewrite happens inside one
+  transaction. Rules that feed a natural key (age bands, location cleanup)
+  create new members instead, and the old ones stay behind unused.
   The dimension updates commit before the fact transaction, so if a
   reprocess fails, rerun it.
 - **After pulling a schema change,** run `--setup` once. Section 1 carries
   `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations for existing tables,
   and Section 10 creates the lease table. A load against a dataset without
   `etl_lease` stops and says to run `--setup`.
-- **Adopting this into a dataset built by an older `:id` MERGE:** run
-  `--setup`, then `--full`. Rows without a `crash_hash` are always rewritten,
-  so one full load rewrites every crash and removes any duplicates the MERGE
-  left; there's no need to truncate first.
 - **Two loads can't run at once.** The second one stops with "Load … holds
   the ETL lease". That's expected if two runs overlap; rerun it later.
 - **A stuck writer lock.** `etl_lease` is named for a lease, but ownership
@@ -1166,8 +1181,7 @@ The two SQL files are run section by section; what is in each one is the
   WHERE lease_name = 'pipeline' AND holder = 'the-verified-stopped-load-id';
   ```
 
-  Confirm exactly one row changed. Never use an unconditional unlock. Old
-  development tables may still have an `expires_at` column; the runner ignores it.
+  Confirm exactly one row changed. Never use an unconditional unlock.
 
   Then finish the recovered load's audit row. A run whose outcome was never
   resolved deliberately wrote nothing to `etl_load_log`, so its row can sit at
@@ -1234,8 +1248,9 @@ In rough priority order, from `TODO.md` and the panel spec:
 
 - [X] **Scheduled cloud refresh.** Running since 2026-10-02: `--delta`
   Mon–Sat and `--full` Sun, both 06:00 America/New_York, with a daily
-  watchdog. What is left is hardening — steps 10 and 11 and Workload
-  Identity Federation, tracked under [Deployment status](#status).
+  watchdog. Hardened since with a failed-execution alert, keyless auth and
+  CI deploys through Workload Identity Federation; see
+  [Deployment status](#status).
 - [ ] Load `ml_cell_attributes` (OSM road miles, ODOT AADT, ACS) so exposure
   becomes a real rate denominator
 - [ ] Load `ml_weather_daily` (NOAA, one station)

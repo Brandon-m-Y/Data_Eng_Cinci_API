@@ -1,10 +1,10 @@
-**Remediation status ? 2026-09-19**
+**Remediation status — 2026-09-19**
 
 The findings below describe the original baseline, not the current working tree. Subsequent changes add verified extraction manifests, serialized writer ownership, a single fact/hash input snapshot, deletion guards, configurable datasets, explicit dimension/fact reprocessing, and tracked load outcomes. Existing MD5 keys remain compatible; reserved key delimiters are rejected rather than silently producing ambiguous keys. MD5 is used for change detection, not security.
 
 Claude approved replacing expiring leases with non-expiring ownership. Unknown BigQuery outcomes retain ownership and suppress competing failure-log writes. Recovery requires stopping the owner, confirming its jobs have finished, and clearing only that owner's lock. The README documents this availability tradeoff and required monitoring.
 
-Local regression tests cover extraction, hashing contracts, configuration, and uncertain writer outcomes. The BigQuery integration scenarios have since been executed against a clone of production; see "Verification" at the end of each round. Deployment and monitoring remain unverified because neither exists yet.
+Local regression tests cover extraction, hashing contracts, configuration, and uncertain writer outcomes. The BigQuery integration scenarios have since been executed against a clone of production; see "Verification" at the end of each round. Deployment and monitoring did not exist yet at that point; both were built and verified on 2026-10-02 (see OPERATIONS.md).
 
 ---
 
